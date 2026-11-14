@@ -11,6 +11,10 @@
 
 ![豆包卡片：额度面板与模型清单](docs/assets/dsh-connect-doubao-quota-card.png)
 
+> 🍴 本仓库是 [Wahwayhale/dsh-connect-doubao](https://github.com/Wahwayhale/dsh-connect-doubao) 的 **fork**，
+> 原作者 **[@Wahwayhale](https://github.com/Wahwayhale)**（[MIT](./LICENSE)）；
+> 本 fork 的维护者与全部贡献者来源见文末[致谢](#致谢)。
+
 ---
 
 ## ⚠️ 前置条件（必读）
@@ -422,6 +426,14 @@ npm run check       # 以上全部
 
 ## 致谢
 
+- **原作者**：本项目由 **[@Wahwayhale](https://github.com/Wahwayhale)** 创建并维护上游仓库
+  [Wahwayhale/dsh-connect-doubao](https://github.com/Wahwayhale/dsh-connect-doubao)，
+  以 [MIT](./LICENSE) 许可证发布；本仓库是其 fork，上游贡献者名单见
+  [contributors](https://github.com/Wahwayhale/dsh-connect-doubao/graphs/contributors)。
+- **上游 PR 贡献者**（本 fork 已合并/待合并的改动来源）：
+  - [chenyusheng](https://github.com/chenyusheng) — [#12](https://github.com/Wahwayhale/dsh-connect-doubao/pull/12) macOS/Linux 浏览器扫码登录支持
+  - [zuosus](https://github.com/zuosus) — [#6](https://github.com/Wahwayhale/dsh-connect-doubao/pull/6) macOS 支持
+  - [Chsw-CC](https://github.com/Chsw-CC) — [#4](https://github.com/Wahwayhale/dsh-connect-doubao/pull/4)、[#16](https://github.com/Wahwayhale/dsh-connect-doubao/pull/16) 会话续传健壮性修复（710020202）
 - **dsh-connect-workbuddy** —— 本插件在**设计思路与插件结构**上借鉴了它的做法
   （loopback shim、provider 注册链路、设置卡片挂载、构建与打包约定），
   **所有代码均为独立实现**，未复制其源码。

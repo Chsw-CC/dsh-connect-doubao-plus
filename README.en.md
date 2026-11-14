@@ -13,6 +13,11 @@
 
 ![Doubao card: quota panel and model checklist](docs/assets/dsh-connect-doubao-quota-card.png)
 
+> 🍴 This repository is a **fork** of
+> [Wahwayhale/dsh-connect-doubao](https://github.com/Wahwayhale/dsh-connect-doubao),
+> originally created by **[@Wahwayhale](https://github.com/Wahwayhale)** ([MIT](./LICENSE));
+> maintainers and every contributor source are listed under [Acknowledgements](#acknowledgements).
+
 ---
 
 ## ⚠️ Prerequisites (read first)
@@ -354,6 +359,16 @@ For **personal study and research only**.
 
 ## Acknowledgements
 
+- **Original author**: this project was created by **[@Wahwayhale](https://github.com/Wahwayhale)**,
+  who maintains the upstream repository
+  [Wahwayhale/dsh-connect-doubao](https://github.com/Wahwayhale/dsh-connect-doubao)
+  under the [MIT](./LICENSE) license. This repository is a fork of it; see the upstream
+  [contributors](https://github.com/Wahwayhale/dsh-connect-doubao/graphs/contributors)
+  for the full list.
+- **Upstream PR contributors** (sources of the changes merged or queued in this fork):
+  - [chenyusheng](https://github.com/chenyusheng) — [#12](https://github.com/Wahwayhale/dsh-connect-doubao/pull/12) macOS/Linux browser QR sign-in support
+  - [zuosus](https://github.com/zuosus) — [#6](https://github.com/Wahwayhale/dsh-connect-doubao/pull/6) macOS support
+  - [Chsw-CC](https://github.com/Chsw-CC) — [#4](https://github.com/Wahwayhale/dsh-connect-doubao/pull/4), [#16](https://github.com/Wahwayhale/dsh-connect-doubao/pull/16) session-continuation robustness fixes (710020202)
 - **dsh-connect-workbuddy** — this plugin borrowed its **design ideas and plugin
   structure** (loopback shim, provider registration path, settings-card mounting,
   build and packaging conventions). **All code is an independent implementation**;
