@@ -19,10 +19,10 @@ import { fileURLToPath } from 'node:url'
 // path: a hardcoded path makes the script throw ENOENT for anyone who clones the
 // repository anywhere else, which is every consumer of the published package.
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
-const FILE = join(ROOT, 'awesome-dsh-plugin-submission', 'Wahwayhale__dsh-connect-doubao.yml')
+const FILE = join(ROOT, 'awesome-dsh-plugin-submission', 'Chsw-CC__dsh-connect-doubao-plus.yml')
 /** Expected owner/repo. The file NAME must carry it, joined by a DOUBLE underscore. */
-const OWNER = 'Wahwayhale'
-const REPO = 'dsh-connect-doubao'
+const OWNER = 'Chsw-CC'
+const REPO = 'dsh-connect-doubao-plus'
 const raw = readFileSync(FILE, 'utf8').replace(/\r\n/g, '\n')
 
 const checks = []

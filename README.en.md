@@ -1,4 +1,4 @@
-# DSH Connect Doubao
+# DSH Connect Doubao Plus
 
 > Connect a **Doubao account** to DeepSeek Harness: the plugin live-discovers **chat models**
 > and **「工作任务」 (task-mode) models** straight from Doubao's web and desktop menus
@@ -10,8 +10,8 @@
 > are all supported — the session is sealed locally with Windows DPAPI, or with
 > AES-256-GCM under a local 0600 key on other platforms.
 
-[![npm version](https://img.shields.io/npm/v/dsh-connect-doubao.svg)](https://www.npmjs.com/package/dsh-connect-doubao)
-[![license](https://img.shields.io/npm/l/dsh-connect-doubao.svg)](./LICENSE)
+[![release](https://img.shields.io/github/v/release/Chsw-CC/dsh-connect-doubao-plus)](https://github.com/Chsw-CC/dsh-connect-doubao-plus/releases)
+[![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 [![dshfind](https://img.shields.io/badge/dshmarket-dshfind-blueviolet)](https://dshfind.dev)
 
 ![Doubao card: quota panel and model checklist](docs/assets/dsh-connect-doubao-quota-card.png)
@@ -205,7 +205,7 @@ DSH (pi-ai provider)
    `710010702`), answers `cmd_call` via `upload_command_result` + `msg/complete`, and
    stops on `agent_finished`. Incremental `CHUNK_DELTA` frames are split into
    thinking/answer by their block id.
-5. **Read-only routes** — `/plugins/dsh-connect-doubao/quota` and `/catalog` serve quota
+5. **Read-only routes** — `/plugins/dsh-connect-doubao-plus/quota` and `/catalog` serve quota
    and catalog from an **explicit allow-list** (no upstream field is passed through),
    and refuse non-loopback origins.
 
@@ -214,19 +214,23 @@ DSH (pi-ai provider)
 ## Installation
 
 ```bash
-# ① via the DSH CLI (recommended)
-dsh plugin --profile desktop add dsh-connect-doubao
+# ① install the packaged tarball from the GitHub release (recommended)
+dsh plugin --profile desktop add "path\\dsh-connect-doubao-plus-0.9.0.tgz"
 
-# ② from npm
-npm install -g dsh-connect-doubao
-dsh plugin --profile desktop add dsh-connect-doubao
-
-# ③ local development (never published; links the source directory)
-dsh plugin --profile desktop add "E:\path\to\dsh-connect-doubao"
+# ② local development (links the source directory)
+git clone https://github.com/Chsw-CC/dsh-connect-doubao-plus.git
+cd dsh-connect-doubao-plus && npm i && npm run build
+dsh plugin --profile desktop add "path\\dsh-connect-doubao-plus"
 ```
 
-> Option ③ writes a `link:` dependency — after editing the sources, just run
+> Option ② writes a `link:` dependency — after editing the sources, just run
 > `npm run build`; no reinstall is needed.
+
+> ⚠️ **This plugin is not published to the npm registry**, and adding it by git URL
+> does not work yet: the repo's `prepack` runs `npm run build`, while the runtime
+> shipped with Harness only provides `node`, not `npm`, so pnpm's git install fails
+> during the prepare step. Use the tarball or the local directory instead — both load
+> the already-built `lib/` output and need no build step.
 
 ### Supported host range
 
@@ -288,12 +292,12 @@ and chat still works.
 
 ```bash
 # check the whole chain without spending inference quota
-dsh-connect-doubao-doctor
-dsh-connect-doubao-doctor --json
+dsh-connect-doubao-plus-doctor
+dsh-connect-doubao-plus-doctor --json
 
 # smoke probe (spends one inference request)
-dsh-connect-doubao-probe --prompt "hi"
-dsh-connect-doubao-probe --prompt "hi" --model 5 --thinking high --json
+dsh-connect-doubao-plus-probe --prompt "hi"
+dsh-connect-doubao-plus-probe --prompt "hi" --model 5 --thinking high --json
 ```
 
 Full `probe` flags:

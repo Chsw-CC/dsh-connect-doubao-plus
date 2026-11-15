@@ -120,7 +120,7 @@ describe('the client bundle can actually load in the desktop shell', () => {
   it('is wrapped in the shell module-loader call', () => {
     expect(artifact()).toContain('__ModuleLoader__')
     expect(built).toContain('__ModuleLoader__.load(')
-    expect(built).toContain('id: "dsh-connect-doubao"')
+    expect(built).toContain('id: "dsh-connect-doubao-plus"')
   })
 
   it('defines module/exports and returns them (banner + intro + footer intact)', () => {

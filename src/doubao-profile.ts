@@ -27,7 +27,7 @@
  * jar in AppData. `loadDoubaoCredentials` walks the list and keeps the first
  * profile that actually decrypts into a usable session.
  *
- * @module dsh-connect-doubao/profile
+ * @module dsh-connect-doubao-plus/profile
  */
 import { existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'

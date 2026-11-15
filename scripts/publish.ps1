@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     明天的发布主力脚本：把「本地能做的事」一步做完。
 
@@ -40,7 +40,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 # 预置远端地址：仅在 origin 缺失时使用，绝不覆盖已有配置。
-$DefaultRemote = 'https://github.com/Wahwayhale/dsh-connect-doubao.git'
+$DefaultRemote = 'https://github.com/Chsw-CC/dsh-connect-doubao-plus.git'
 $MainBranch = 'main'
 
 # 解析仓库根目录（本脚本位于 <root>/scripts/）。
@@ -77,7 +77,7 @@ function Invoke-Git {
 
 try {
     Write-Host "============================================================" -ForegroundColor Cyan
-    Write-Host " dsh-connect-doubao 发布脚本" -ForegroundColor Cyan
+    Write-Host " dsh-connect-doubao-plus 发布脚本" -ForegroundColor Cyan
     Write-Host " 仓库: $RepoRoot" -ForegroundColor Cyan
     Write-Host "============================================================" -ForegroundColor Cyan
 
@@ -170,7 +170,7 @@ try {
         Write-Ok '已推送'
         Write-Host ''
         Write-Host '  ✅ 下一步（需要你在浏览器做，脚本做不了）：' -ForegroundColor Green
-        Write-Host '     1) 打开 https://github.com/Wahwayhale/dsh-connect-doubao' -ForegroundColor Green
+        Write-Host '     1) 打开 https://github.com/Chsw-CC/dsh-connect-doubao-plus' -ForegroundColor Green
         Write-Host '     2) 右侧 Topics 点「Add a topic」→ 输入 dsh-plugin → Add' -ForegroundColor Green
         Write-Host '     3) 确认仓库已创建满 24 小时（市场 CI 的硬性要求 R4）' -ForegroundColor Green
     } else {

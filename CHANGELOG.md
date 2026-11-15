@@ -4,6 +4,25 @@
 
 ---
 
+## 0.9.0 — 2026-11-15
+
+> 更名版本：fork 从 `dsh-connect-doubao` 改为 **`dsh-connect-doubao-plus`**，
+> 仓库同步改为 [Chsw-CC/dsh-connect-doubao-plus](https://github.com/Chsw-CC/dsh-connect-doubao-plus)，
+> 并投稿到 awesome-dsh-plugin 插件市场。
+
+### 变更
+
+- **包名 / 插件 id 改为 `dsh-connect-doubao-plus`**：`package.json` 的 `name` / `displayName` /
+  三个 `bin` 入口、`cordis.patch.yml` 的 `id` 与 `name`、`PLUGIN_ID`、客户端 `name` 与
+  locale 命名空间、只读路由 `/plugins/dsh-connect-doubao-plus/*`、设置页 section id、
+  客户端 bundle 的 `__ModuleLoader__.load({ id })` 全部一起改，避免宿主里出现两套 id。
+- **仓库元数据指向本 fork**：`repository` / `homepage` / `bugs` 不再是上游
+  `Wahwayhale/dsh-connect-doubao`；上游署名（fork 说明、贡献者列表）原样保留。
+- **不迁移本地数据**：设置文件仍是 `~/.dsh/dsh-connect-doubao.settings.json`，凭据与生图缓存
+  路径不变 —— 升级不需要重新扫码登录，已有设置不会丢。
+- **安装说明改写**：本仓库不发 npm；`prepack` 依赖 `npm`，而 Harness 内置运行时只有 `node`，
+  因此 git 地址直装会在 prepare 阶段失败。README 改为 GitHub Release tarball 与本地源码目录两种方式。
+
 ## 0.8.0 — 2026-11-15
 
 > 同步上游 0.7.0 / 0.7.1，合入社区 PR #12（macOS / Linux 浏览器扫码登录，关联 issue #10），

@@ -28,7 +28,7 @@
  * AES-256-GCM with a local 0600 key file elsewhere. Nothing here is logged, and
  * nothing leaves except the outbound request's `Cookie:` header.
  *
- * @module dsh-connect-doubao/auth
+ * @module dsh-connect-doubao-plus/auth
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, rmSync, mkdtempSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'

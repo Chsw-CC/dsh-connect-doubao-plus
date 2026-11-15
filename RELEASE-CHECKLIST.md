@@ -1,4 +1,4 @@
-# 发布检查清单 · dsh-connect-doubao
+# 发布检查清单 · dsh-connect-doubao-plus
 
 > 面向人。按顺序执行，每一步都给了**预期输出**，方便你比对。
 > 全程约 10 分钟操作 + **必须等满 24 小时**（见步骤 7，硬性规则）。
@@ -53,13 +53,13 @@ node scripts\publish-checklist.mjs
 
 浏览器：新建仓库
 
-- 名称：`dsh-connect-doubao`
+- 名称：`dsh-connect-doubao-plus`
 - ⚠️ **不要**勾选自动创建 README / LICENSE / `.gitignore`（会与本地冲突）
 
 然后：
 
 ```powershell
-git remote add origin https://github.com/Wahwayhale/dsh-connect-doubao.git
+git remote add origin https://github.com/Chsw-CC/dsh-connect-doubao-plus.git
 git push -u origin main
 ```
 
@@ -67,7 +67,7 @@ git push -u origin main
 
 ```
 Enumerating objects: 71, done.
-To https://github.com/Wahwayhale/dsh-connect-doubao.git
+To https://github.com/Chsw-CC/dsh-connect-doubao-plus.git
  * [new branch]      main -> main
 ```
 
@@ -101,15 +101,15 @@ npm publish --access public
 ```powershell
 git clone https://github.com/<你的账号>/awesome-dsh-plugin.git
 cd awesome-dsh-plugin
-git checkout -b add-dsh-connect-doubao
+git checkout -b add-dsh-connect-doubao-plus
 
 mkdir data\plugins -Force
-copy "E:\project\新建文件夹\dsh-connect-doubao\awesome-dsh-plugin-submission\Wahwayhale__dsh-connect-doubao.yml" `
-      "data\plugins\Wahwayhale__dsh-connect-doubao.yml"
+copy "E:\project\新建文件夹\dsh-connect-doubao-plus\awesome-dsh-plugin-submission\Chsw-CC__dsh-connect-doubao-plus.yml" `
+      "data\plugins\Chsw-CC__dsh-connect-doubao-plus.yml"
 
-git add data\plugins\Wahwayhale__dsh-connect-doubao.yml
-git commit -m "Add dsh-connect-doubao"
-git push origin add-dsh-connect-doubao
+git add data\plugins\Chsw-CC__dsh-connect-doubao-plus.yml
+git commit -m "Add dsh-connect-doubao-plus"
+git push origin add-dsh-connect-doubao-plus
 ```
 
 然后浏览器打开你的 fork → **Compare & pull request** → 提到上游。
@@ -150,9 +150,9 @@ CI 顺序是固定的（先查条数，最后才联网），失败信息会直�
 
 | 项 | 值 |
 | --- | --- |
-| 仓库 | `https://github.com/Wahwayhale/dsh-connect-doubao` |
-| npm 包 | `dsh-connect-doubao` |
-| 投稿路径 | `data/plugins/Wahwayhale__dsh-connect-doubao.yml`（**双下划线**） |
+| 仓库 | `https://github.com/Chsw-CC/dsh-connect-doubao-plus` |
+| 发布物 | GitHub Release `v0.9.0` 的 tarball（不发 npm） |
+| 投稿路径 | `data/plugins/Chsw-CC__dsh-connect-doubao-plus.yml`（**双下划线**） |
 | 分类 | `model` |
 | 必需 topic | `dsh-plugin` |
 | 许可证 | MIT，`Copyright (c) 2026 Wahwayhale` |
