@@ -1,12 +1,17 @@
 # 发版流程与「市场不更新」排查手册
 
 > 这份文档记录 0.6.0 发版时踩过的坑。下次发版直接照着走，别再花两天排查。
+>
+> **本 fork 的差异（0.9.0 起）**：插件已更名为 `dsh-connect-doubao-plus`，**不再发布 npm**，
+> 只发 GitHub Release（附打包好的 `.tgz`）；市场条目文件是
+> `awesome-dsh-plugin-submission/Chsw-CC__dsh-connect-doubao-plus.yml`，
+> 对应仓库 `Chsw-CC/dsh-connect-doubao-plus`。下文第 1 步的 npm 流程仅保留作上游历史参考。
 
 ---
 
 ## 一、发版四步（顺序不能错）
 
-### 1. 发布 npm
+### 1. 发布包（本 fork：GitHub Release，不发 npm）
 
 ```powershell
 cd E:\project\新建文件夹\dsh-connect-doubao
@@ -23,26 +28,26 @@ git push origin main
 
 ### 3. 提市场 PR
 
-改 `awesome-dsh-plugin-submission/Wahwayhale__dsh-connect-doubao.yml` 的 `description`，然后：
+改 `awesome-dsh-plugin-submission/Chsw-CC__dsh-connect-doubao-plus.yml` 的 `description`，然后：
 
 ```powershell
 git clone https://github.com/awesome-dsh-plugin/awesome-dsh-plugin.git
 cd awesome-dsh-plugin
 git checkout -b update-xxx
-# 覆盖 data/plugins/Wahwayhale__dsh-connect-doubao.yml（去掉本地文件的注释头）
+# 覆盖 data/plugins/Chsw-CC__dsh-connect-doubao-plus.yml（去掉本地文件的注释头）
 git diff --stat          # 应该只有几行
-git add data/plugins/Wahwayhale__dsh-connect-doubao.yml
+git add data/plugins/Chsw-CC__dsh-connect-doubao-plus.yml
 git commit -m "..."
 git push origin update-xxx
 ```
 
-**关键：推到自己的 fork（`Wahwayhale/awesome-dsh-plugin`），不要直接推上游。** 上游没有写权限，会 403。
+**关键：推到自己的 fork（`Chsw-CC/awesome-dsh-plugin`），不要直接推上游。** 上游没有写权限，会 403。
 
 然后开 PR：
 
 ```powershell
 # fork 上推完，用 API 或网页开 PR
-https://github.com/Wahwayhale/awesome-dsh-plugin/pull/new/<branch>
+https://github.com/Chsw-CC/awesome-dsh-plugin/pull/new/<branch>
 ```
 
 ### 4. 等 CI
