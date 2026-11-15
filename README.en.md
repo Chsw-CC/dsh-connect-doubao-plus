@@ -1,8 +1,10 @@
 # DSH Connect Doubao
 
-> Connect a **Doubao account** to DeepSeek Harness: **chat models** and
-> **「工作任务」 (task-mode) models** (2.1 Lite / 2.1 Pro / Auto, which spend the paid
-> membership quota), **Seedream image generation**, plus a **read-only** quota panel
+> Connect a **Doubao account** to DeepSeek Harness: the plugin live-discovers **chat models**
+> and **「工作任务」 (task-mode) models** straight from Doubao's web and desktop menus
+> (task-mode models spend the paid membership quota), with **chain-of-thought reasoning
+> passthrough**, **native DSH Token usage and session stats**, **Seedream image generation**,
+> plus a **read-only** quota panel
 > (5-hour window / weekly window / activity grant, each with a reset countdown).
 > There is exactly one way in: **one browser QR sign-in**. Windows / macOS / Linux
 > are all supported — the session is sealed locally with Windows DPAPI, or with
@@ -49,7 +51,7 @@ With no session the plugin fails loudly ("还没有浏览器登录态…") rathe
 - **The model list is the client's own menu, not a hardcoded table** — the plugin reads
   `Default/Preferences` → `saman.local_storage_for_web['frontend-request-cache']`, so new
   models, new prices and new level ladders appear without a plugin release. Measured
-  2026-11-12: 12 models (2 对话-mode, 9 「工作任务」-mode, 1 alias) plus the image alias.
+  2026-11-12: 12 models (2 对话-mode, 10 「工作任务」-mode) plus the image-generation alias.
 - **Billing multipliers, verbatim** — the menu's `tag_list` is shown unchanged: `0.65x`,
   `0.46x` etc. as plain multipliers, `限时优惠 0.01x` / `小额免费` as campaign tags (outlined
   so a promo cannot read as the standing price). Display only: the plugin does not bill
@@ -62,6 +64,12 @@ With no session the plugin fails loudly ("还没有浏览器登录态…") rathe
 - **Deep thinking on by default** — no extra switch: non-task models send
   `need_deep_think: 3` on every turn, task models keep the captured `10001`. Set
   `DSH_DOUBAO_DEEP_THINK=0` to turn it back off.
+- **Chain-of-thought passthrough and native usage stats** — `reasoning_content` streams
+  through untouched; Token usage and session stats (TTFT, generation rate, context-cache
+  hits) feed DSH's own counters.
+- **Tool-call emulation on by default** (0.7.1) — Doubao can drive DSH's local tools:
+  OpenAI `tools` → ```doubao-tool fences → `tool_calls`, parsing JSON arrays, OpenAI
+  nested shapes and ```json fences.
 - **Read-only quota panel** — 5-hour, weekly and activity-grant windows as bars, each
   with a **reset countdown**; manual refresh plus a 5-minute automatic poll.
 - **Model checklist** — ticked entries appear in DSH's model picker and are sent as
