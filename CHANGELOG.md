@@ -4,24 +4,41 @@
 
 ---
 
-## Unreleased
+## 0.8.0 — 2026-11-15
 
-> 支持 macOS / Linux 浏览器扫码登录（社区贡献，关联 issue #10）。
+> 同步上游 0.7.0 / 0.7.1，合入社区 PR #12（macOS / Linux 浏览器扫码登录，关联 issue #10），
+> 并加入本仓库自有修复：会话续传加固与流中断即停。
 
-### 新增
+### 新增（本仓库）
+
+- **流被掐断即停豆包端生成**（`doubao-shim`）：客户端断开、空闲看门狗、710020202 同turn回退
+  触发 abort 时调用网页端 `break_stream_msg`（cmd 2240, break_reason=7），按 `conversation_id` +
+  `question_id` 停掉本轮服务端生成，旧线程不再空转烧积分；独立 5s 超时、fire-and-forget。
+- **同turn回退被拒续传**：被拒的 conversation id 不再复用（改发前先停被拒线程），同一 turn 内
+  改发新会话完成续传；连续三次上游失败触发**熔断阀**，会话记忆有效期收敛为 7 天（`SESSION_TTL_MS`）。
+
+### 同步上游
+
+- **0.7.0**：在线菜单模型发现、对话框计费倍率展示、逐模型思考档位、思考链（CoT）推理透传、
+  原生 Token 用量与会话统计。
+- **0.7.1**：工具模拟默认开启、解析加固与多轮上下文修复；生图直取无水印原图。
+
+### 跨平台登录（社区 PR #12）
+
+#### 新增
 
 - **跨平台会话密封**（`doubao-auth`）：Windows 继续用 DPAPI；macOS / Linux 改用 AES-256-GCM，
   密钥存于 `~/.dsh/doubao-credentials.key`（0600），密封文件带 `DSHD1:` 版本标记。
 - **跨平台浏览器查找**（`doubao-auth-browser`）：`findBrowser()` 按 `process.platform` 选择候选
   （macOS `.app` 包 / Linux 可执行文件），并支持 `DSH_DOUBAO_CHROME` 显式指定任意 Chromium 二进制。
 
-### 修复
+#### 修复
 
 - **POSIX 上登录浏览器残留**（`doubao-auth-browser`）：原 `terminate()` 用 `taskkill`，而
   `spawnSync` 在 ENOENT 时不抛异常，导致 `child.kill()` 兜底从不执行、调试端口 9333 被占用。
   现按平台分支，非 Windows 直接 `SIGTERM`。
 
-### 测试
+#### 测试
 
 - 新增 `tests/macos-compat.test.ts`：覆盖 `DSH_DOUBAO_CHROME` 覆盖、`terminate()` 平台分支，
   以及隔离 HOME 下的 AES-256-GCM 密封往返与篡改拒绝。
