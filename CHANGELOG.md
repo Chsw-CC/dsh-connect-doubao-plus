@@ -4,6 +4,28 @@
 
 ---
 
+## Unreleased
+
+> 支持 macOS / Linux 浏览器扫码登录（社区贡献，关联 issue #10）。
+
+### 新增
+
+- **跨平台会话密封**（`doubao-auth`）：Windows 继续用 DPAPI；macOS / Linux 改用 AES-256-GCM，
+  密钥存于 `~/.dsh/doubao-credentials.key`（0600），密封文件带 `DSHD1:` 版本标记。
+- **跨平台浏览器查找**（`doubao-auth-browser`）：`findBrowser()` 按 `process.platform` 选择候选
+  （macOS `.app` 包 / Linux 可执行文件），并支持 `DSH_DOUBAO_CHROME` 显式指定任意 Chromium 二进制。
+
+### 修复
+
+- **POSIX 上登录浏览器残留**（`doubao-auth-browser`）：原 `terminate()` 用 `taskkill`，而
+  `spawnSync` 在 ENOENT 时不抛异常，导致 `child.kill()` 兜底从不执行、调试端口 9333 被占用。
+  现按平台分支，非 Windows 直接 `SIGTERM`。
+
+### 测试
+
+- 新增 `tests/macos-compat.test.ts`：覆盖 `DSH_DOUBAO_CHROME` 覆盖、`terminate()` 平台分支，
+  以及隔离 HOME 下的 AES-256-GCM 密封往返与篡改拒绝。
+
 ## 0.7.1 — 2026-11-14
 
 > 这一版把「提示词模拟工具调用」从实验性默认关闭改为**默认开启**，并加固了解析与多轮上下文，让豆包及客户端接入的第三方模型（DeepSeek / Kimi / GLM 等）开箱即能驱动 DSH 的本地工具。
@@ -25,7 +47,6 @@
 - 新增解析回归：JSON 数组多调用、OpenAI `function` 包装、```json 围栏回退各一例。
 - 更新默认值断言：`toolEmulation` 默认应为 `true`。
 - 新增 `vitest.config.ts`，把测试范围限定在 `tests/`，避免误扫本机克隆的市场仓库（`awesome-dsh-plugin/`）里不相干的脚本。
-- `npm run check`（typecheck + build + test + locale）全绿。
 
 ---
 
