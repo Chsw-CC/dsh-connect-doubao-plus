@@ -4,6 +4,170 @@
 
 ---
 
+## 0.7.1 — 2026-11-14
+
+> 这一版把「提示词模拟工具调用」从实验性默认关闭改为**默认开启**，并加固了解析与多轮上下文，让豆包及客户端接入的第三方模型（DeepSeek / Kimi / GLM 等）开箱即能驱动 DSH 的本地工具。
+
+### 变更
+
+- **工具模拟默认开启**（`doubao-config` / `doubao-shim`）：`toolEmulation` 默认值由 `false` 改为 `true`，`toolEmulationOf` 改为「除非显式设为 `false` 否则开启」，shim 的 `emulationOn` 回退同步改为 `true`。新装用户无需手动打开开关，即可让豆包通过 OpenAI `tools` → `doubao-tool` 围栏 → `tool_calls` 的转译调用本地工具。设置页文案同步更新，去掉「实验性 / 默认关闭」措辞。
+
+### 修复与加固
+
+- **工具调用解析支持更多形态**（`doubao-tools`）：
+  - 单个围栏内的 **JSON 数组**（一次并行多个工具调用）现在会被全部解析，而不再只取第一个。
+  - 兼容 **OpenAI 嵌套结构** `{"type":"function","function":{"name":...,"arguments":...}}`。
+  - 新增 ```json 围栏回退：当模型改用 ```json 输出严格包含 `name` 与 `arguments`/`params` 的对象（或数组）时也能识别并转译为标准 `tool_calls`；非工具形状的普通 JSON 代码块保持原样不误吞。
+- **多轮工具调用上下文不再丢失**（`doubao-shim`）：`buildPrompt` 展开历史消息时，若 `assistant` 消息正文为空但带有 `tool_calls`，此前会被整条跳过；现在会把它还原为 ```doubao-tool 围栏拼回上下文，与随后的 `[tool result]` 正确配对，避免续接轮里模型「忘记」自己刚发起过哪个调用。参数为已解析对象或非法 JSON 字符串时均做了安全兜底。
+
+### 测试与校验
+
+- 新增解析回归：JSON 数组多调用、OpenAI `function` 包装、```json 围栏回退各一例。
+- 更新默认值断言：`toolEmulation` 默认应为 `true`。
+- 新增 `vitest.config.ts`，把测试范围限定在 `tests/`，避免误扫本机克隆的市场仓库（`awesome-dsh-plugin/`）里不相干的脚本。
+- `npm run check`（typecheck + build + test + locale）全绿。
+
+---
+
+## 0.7.0 — 2026-11-13
+
+> 这一版补齐了在线模型发现链路，把思考链（CoT）、对话框模型倍率展示、以及 DSH 原生 Token 用量与会话统计全部接了进来。
+
+### 新增
+
+- **对话框模型选择倍率与对比弹窗**（`DoubaoRateControls` / `DoubaoCatalogStore`）
+  - 接入 DSH 对话框插槽 `conversation.input.model.label` 与 `conversation.input.right`，在模型下拉选项中直接显示豆包模型计费倍率与活动优惠标签，在输入框右侧提供当前倍率胶囊控件。
+  - 点击输入框右侧倍率控件可弹出所有已发现豆包模型的倍率对比面板，并支持手动强制刷新目录；非 Doubao 供应商保持宿主原有徽标与渲染样式不变。
+- **思考链（深度思考 CoT）完整接入**（`doubao-upstream` / `doubao-shim`）
+  - 完善 `block_type: 10040` 思考容器、`parent_id` 思考子块、`text_block.summary` 摘要式推理、无 `id` 的 `CHUNK_DELTA` 状态追踪路由（`BlockCollectState`），以及占位标题过滤与 `STREAM_MSG_NOTIFY` 回放去重，确保思考过程完整输出到 OpenAI `reasoning_content` 与 DSH `reasoning-delta`。
+  - 支持普通对话模型传入 `reasoning_effort: "off"` 显式关闭深度思考；「工作任务」模型首轮默认携带 `conversation_mode: "2"`。
+- **DSH 原生 Token 用量与会话统计**（`doubao-tokens` / `doubao-stats` / `DoubaoQuotaCard`）
+  - 为 `/v1/chat/completions` 流式（含 `stream_options.include_usage: false` 控制）与非流式响应生成确定性 OpenAI `usage`（满足 DSH `TokenMeter` 4 字符/token 下限要求，多轮 `conversation_id` 续接前缀记入 `prompt_tokens_details.cached_tokens`，思考过程记入 `completion_tokens_details.reasoning_tokens`，兼容模拟工具调用词元统计），直接驱动 DSH 顶部/状态栏 Token 用量与会话统计。
+  - 在 `doubao-upstream` 解析任务轮次上游上报的 `context_window_usage`、`tea_tags_time_cost`（`ack_cost_time` / `first_packet_cost_time`）、`finish_time_ms` 与 `finish_reason_chat`。
+  - 新增内存统计收集器 `DoubaoStatsTracker`（最多保留 64 个不透明会话键，不记录提示词/凭据原文）与路由 `GET|POST /plugins/dsh-connect-doubao/stats`（支持带 `x-dsh-doubao-write` 校验头的清零操作），并在插件设置页新增「会话统计与 Token 用量」面板展示请求数、续接数、Token 细分、缓存命中率、平均 TTFT、生成速率（tok/s）及最近一轮上游窗口拆解。
+
+### 修复
+
+- **在线模型发现与刷新联动**（`doubao-discovery` / `doubao-status`）：新增 `POST /alice/slot/action_bar_v3/brief_list` 在线菜单解析（支持 `menu_conf_v2` 与 `menu_conf` 回退）、多 Profile 目录候选扫描及遍历所有 `BriefListRequestCache` 键；点击「刷新」或完成浏览器扫码重登录后自动触发在线刷新并重建适配器模型列表。
+- **端口绑定通知与勾选列表初始化**（`doubao-adapter` / `index`）：新增 `onBaseUrlReady` 回调在 shim 端口就绪后通知宿主刷新可用路由，并使用合并后的 `current`（而非 Loader 原始配置）初始化 `enabledModelIds`。
+- **额度耗尽判定误拦截**（`doubao-quota`）：通过 `evaluateQuotaExhausted` 仅在所有有效额度分组都耗尽时才判定账号额度用完，避免活动赠送额度用尽误拦常规 5 小时/周额度请求。
+- **生图路由隔离与提示词清理**（`doubao-shim` / `doubao-upstream`）：`image-gen`（兼容大小写与 `doubao/` 前缀）强制关闭深度思考、跳过工具模拟与多轮上下文续接；`buildImagePrompt` 放宽描述上限至 2000 字符并清理 `<system-reminder>`、`<hindsight_page_refresh>` 及框架上下文注入文本；无水印原图缺失时支持回退 `image_ori`。
+
+### 测试与校验
+
+- 新增思维链、倍率控件、Token 估算、会话统计路由与设置页卡片、以及通过 `@deepseek-ai/dsh-llm-pi-ai`（`PiAiAdapter`）真实串联 loopback shim 的端到端集成测试，覆盖流式/非流式、多轮缓存增长与模拟工具调用。
+
+---
+
+## 0.6.1 — 2026-11-12
+
+> 这一版把「模型清单」从一张硬编码表，改成照抄豆包客户端菜单：有什么模型、各自多少倍率、
+> 各自支持哪几档思考强度，全部实时读出来。三处缺陷叠在一起，任何一处单修都看不出效果。
+
+### 修复
+
+- **清单读错了缓存目录** —— `CACHE_DB_DIRS` 只列了 `chrome_doubao-launcher_0`，该库最后
+  一次写入是 2026-09-17，插件于是永远只看到 `0/3/4/5/9` 五条，而客户端菜单早已列出十二条。
+  现在优先读 `Default/Preferences` 里的 `saman.local_storage_for_web['frontend-request-cache']`
+  （应用每次刷新菜单都会重写，是唯一还保持最新的源），IndexedDB 退为兜底，并补上
+  `chrome_doubao-chat_0`。
+- **键名校验卡掉了新模型** —— `looksLikeModelKey` 原为 `/^[\w-]{1,24}$/`，而第三方模型键长
+  27–37（`person-kimi-k3-1-pro-highspeed-261111` 是 37 字符），于是 Kimi 高速 / GLM Flash /
+  DeepSeek V4 系列被逐条丢弃。改为按形状校验、长度上限 64。
+- **刷新按钮其实不刷新** —— 卡片的「刷新」发的是 GET，而清 memo 的分支挂在 POST 上，于是它把
+  十分钟前的 memo 原样又画了一遍。改为 POST（带 `x-dsh-doubao-write` 头），现在点一次就真重读。
+- **极高 / 最高 根本发不出去** —— shim 的 `toDoubaoLevel` 只认 low/mid/high，序号 6 和 7 被静默
+  夹到「高」，DeepSeek / Kimi / 2.1 Max 的上半档等于不存在。现在 6/7 直通。
+- **档位顺序被排序打乱** —— 「自动」声明的是 低(3) / 中(8) / 高(5)，按数值排序会把「高」排成
+  中间档、8 排成最强档。改为保留菜单顺序。
+- **非标准档位被吞掉** —— `findReasoningLevel` 以前只认三个名字，序号 8 会退回「高」；现在未知
+  序号原样透传成一个临时档位，不会把用户选的那个换掉。
+
+### 新增
+
+- **倍率 / 优惠标签** —— 读客户端菜单的 `tag_list` 原样显示：`0.65x`、`0.46x` 这类是倍率，
+  `限时优惠 0.01x`、`小额免费` 这类是活动标签（描边样式区分，避免活动价被当成常价）。
+  卡片同时注明「倍率来自客户端菜单，本插件不参与计费，也无法核对实际扣费」。
+- **每个模型自己的思考档位** —— 菜单的 `reasoning_effort_config.option_list` 是逐模型的，而且
+  不统一：GLM 只有 低/高/最高（3/5/7），2.1 Lite 是 低/中/高（3/4/5）。以前统一用目录里那三档，
+  等于对 GLM 承诺了一个它没开的「中」。现在按模型自己的阶梯渲染，`thinkingLevelMap` 也据此生成。
+- **档位验证标记** —— 实测过的档位（3/4/5）实线；只在菜单里声明、还没在真实请求中验证的
+  （6 极高 / 7 最高）虚线，tooltip 里写明。
+
+### 其它
+
+- 新模型按 `default_mode` 归入对应模式：`mode_id: "3"` 的第三方模型走「工作任务」
+  （`agent_mode 1` / `conversation_mode 2` / `need_deep_think 10001`），不会被当成普通对话。
+- `findDoubaoModel` 对未见过的键改为原样透传，新增 `isKnownModelId` 区分「没有显示名」与
+  「不存在」——否则新模型会被静默换成豆包快速。
+- `toPiModel` 的 `thinkingLevelMap` 按模型阶梯生成：`xhigh` / `max` 只在模型真有这两档时给出
+  映射，否则为 `null`（pi-ai 把 `null` 读成「不提供」，而不是夹到相邻档）。
+- 卡片里的 `requested_model` 优先显示客户端原名。
+- 新增回归测试：长 `person-*` 键必须能解析、超长与含空格的键必须被拒、6/7 档位、未知序号透传、
+  逐模型阶梯、倍率原样保留。
+
+---
+
+## 0.6.0 — 2026-11-11
+
+> 模型清单从「只认五个老模型」修成「客户端菜单有什么就显示什么」。三处缺陷叠在一起，
+> 任何一处单修都看不出效果。
+
+### 修复
+
+- **清单读错了缓存目录**：`CACHE_DB_DIRS` 只列了 `chrome_doubao-launcher_0`，该库最后一次
+  写入是 2026-09-17，插件于是永远只看到 `0/3/4/5/9` 五条，而客户端菜单早已列出十二条。
+  现在优先读 `Default/Preferences` 里的 `saman.local_storage_for_web['frontend-request-cache']`
+  （应用每次刷新菜单都会重写，是唯一还保持最新的源），IndexedDB 退为兜底，并补上
+  `chrome_doubao-chat_0`。
+- **键名校验卡掉了新模型**：`looksLikeModelKey` 原为 `/^[\w-]{1,24}$/`，而第三方模型键长
+  27–37（`person-kimi-k3-1-pro-highspeed-261111` 37 字符），于是 Kimi 高速 / GLM Flash /
+  DeepSeek V4 系列被逐条丢弃。改为按形状校验、长度上限 64。
+- **刷新按钮其实不刷新**：卡片的「刷新」发的是 GET，而清 memo 的分支挂在 POST 上，
+  于是它把十年前的 memo 原样又画了一遍。改为 POST（带 `x-dsh-doubao-write`），
+  现在点一次就真重读缓存。
+
+### 其它
+
+- 新模型按 `default_mode` 归入对应模式：`mode_id: "3"` 的第三方模型走「工作任务」
+  （`agent_mode 1` / `conversation_mode 2` / `need_deep_think 10001`），不会被当成普通对话。
+- `findDoubaoModel` 对未见过的键改为原样透传 + `isKnownModelId` 区分「没名字」与「不存在」，
+  否则新模型会被静默换成豆包快速。
+- 卡片里的 `requested_model` 优先显示客户端原名。
+- 新增回归测试：长 `person-*` 键必须能解析、超长与含空格的键必须被拒。
+
+---
+## 0.6.0 — 2026-11-11
+
+> 生图这条路从「能出图」修到「在对话框里直接看到对的图」。三处都是实测出来的，不是推断。
+
+### 修复
+
+- **无水印**：生图回复里同时带着 `image_ori`（右下角有「豆包AI生成」）和 `image_ori_raw`
+  （原图）。原来取 `image_ori`，所以每张图都带 logo。现在优先 `image_ori_raw`，取不到才回落，
+  账号没开无水印档位时行为不变。
+- **提示词不再被框架文本污染**：DSH 一轮请求会带 7 条 message——开发者提示、运行时快照、
+  技能目录、MCP 列表、记忆页面——真正的用户描述夹在其中。原来取「最后一条 user 消息」，
+  拿到的是 `<system-reminder>` 块，于是豆包把 `turn 1 step 1`、工具名当成画面内容画了出来
+  （用户看到的 “1turn / tup / tun” 残影）。现在按三条标准筛：长度 ≤600 字符、不以 `<` 开头、
+  不含已知框架标记。
+- **自动补「生成图片：」前缀**：桌面客户端靠 `chat_ability.ability_param.reply_message_format`
+  改写正文，外部客户端没有这个钩子，服务端会把请求当普通对话回答。`withImagePrefix()` 补上
+  同样的改写；已有前缀不重复加，普通对话完全不受影响。
+- **模型 id 宽松匹配**：DSH 可能带 provider 前缀（`doubao/image-gen`）或大小写不同，
+  漏判会静默回落到完整 agent 提示词——这正是提示词被污染的另一半原因。
+
+### 其它
+
+- 生图版本名改为读插件根目录的 `image-models.json`（缺省 Seedream 5.5）。该文件由
+  `doubao_imagemodels.py --sync` 从服务端 `get_item_conf` 生成，服务端上新版本后改数据即可，
+  不用改代码。
+- 新增 `DSH_DOUBAO_DEBUG_PROMPT=1`：把实际发出的 prompt 与原始 messages 结构打到 stderr，
+  并追加到 `~/.dsh/doubao-prompt.log`。默认关闭。
+- 新增测试：无水印变体选择、前缀注入（含幂等与普通对话不受影响）。
+
+---
+
 ## 0.5.0 — 2026-11-07
 
 > 取凭据的路只剩一条：**浏览器扫码登录**。上一轮加的 `authMode` 开关（客户端 / 浏览器）

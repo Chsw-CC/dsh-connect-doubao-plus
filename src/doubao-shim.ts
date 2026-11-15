@@ -1,3 +1,6 @@
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 /**
  * Loopback shim for the Doubao route.
  *
@@ -54,6 +57,7 @@ import {
   SKILL_CARRIER_MODEL_ID,
   type DoubaoSkillName,
 } from './doubao-catalog.ts'
+import { liveModels } from './doubao-discovery.ts'
 import {
   buildToolContract,
   parseToolCalls,
@@ -61,6 +65,8 @@ import {
   type EmulatedToolCall,
   type InboundTool,
 } from './doubao-tools.ts'
+import { resolveChatUsage, type TokenizableToolCall } from './doubao-tokens.ts'
+import { DoubaoStatsTracker, type DoubaoStatsView } from './doubao-stats.ts'
 
 /** Hostnames the inbound half will accept. */
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
@@ -160,6 +166,10 @@ export interface DoubaoShim {
    * callers that can wait (the doctor, and the adapter's own warm-up).
    */
   baseUrlSync(): string | undefined
+  /** Current session & token usage snapshot recorded by this shim. */
+  stats(): DoubaoStatsView
+  /** Clear accumulated runtime session & token statistics. */
+  resetStats(): void
   /** Release the port. */
   close(): Promise<void>
 }
@@ -173,8 +183,13 @@ interface InboundChatRequest {
     /** Present on `role: "tool"` messages. */
     tool_call_id?: string
     name?: string
+    /** Historical assistant tool calls echoed back by OpenAI clients. */
+    tool_calls?: TokenizableToolCall[]
   }>
   stream?: boolean
+  stream_options?: {
+    include_usage?: boolean
+  }
   /**
    * Thinking level as spelled by the adapter's `thinkingLevelMap`
    * (minimal | low | medium | high, or null for off).
@@ -190,17 +205,24 @@ interface InboundChatRequest {
 /**
  * Translate the adapter's thinking-level spelling into a Doubao level id.
  *
- * pi-ai speaks OpenAI's names — including `medium` and `minimal`, which Doubao
- * has no equivalent for. Doubao only publishes 低 / 中 / 高, so the nearest
- * Doubao level wins: `minimal` and `low` both mean 低, `medium` means 中.
+ * The adapter already speaks catalog ids, and those are the same five the client
+ * menu offers (低 / 中 / 高 / 极高 / 最高), so this is mostly a passthrough — but
+ * pi-ai's own spellings can still arrive from a hand-written request, and those
+ * collapse onto the nearest Doubao rung: `minimal` means 低, `medium` means 中.
  * An unrecognised or absent value leaves the default in place.
  */
-function toDoubaoLevel(spelling: string | null | undefined): 'low' | 'mid' | 'high' | undefined {
+function toDoubaoLevel(
+  spelling: string | null | undefined,
+): 'low' | 'mid' | 'high' | 'xhigh' | 'max' | undefined {
   switch (spelling) {
     case 'minimal':
     case 'low':    return 'low'
     case 'medium': return 'mid'
     case 'high':   return 'high'
+    // Declared by the client menu for DeepSeek / Kimi / 2.1 Max. They used to be
+    // clamped to 高 here, which made the top two rungs of those models unreachable.
+    case 'xhigh':  return 'xhigh'
+    case 'max':    return 'max'
     default:       return undefined
   }
 }
@@ -224,6 +246,11 @@ function describeRequestedModel(key: string | undefined): {
     const fallback = findDoubaoModel(undefined)
     return { name: fallback.name, item_key: fallback.id }
   }
+  // `known` means "this release has a display name for it", which is a narrower
+  // question than "the key is real": a model the client menu discovered after this
+  // build shipped is forwarded correctly but can only be echoed by its key.
+  const discovered = liveModels().find((model) => model.id === key)
+  if (discovered !== undefined) return { name: discovered.name, item_key: key }
   const known = DOUBAO_MODELS.some((model) => model.id === key)
   return known
     ? { name: findDoubaoModel(key).name, item_key: key }
@@ -237,9 +264,12 @@ function describeRequestedModel(key: string | undefined): {
  * the inbound `model` is a catalog id that IS Doubao's `model_item_key`, and
  * `reasoning_effort` is the adapter's level spelling.
  */
-function requestOptions(parsed: InboundChatRequest): {
+export function requestOptions(parsed: {
+  model?: string | undefined
+  reasoning_effort?: string | null | undefined
+}): {
   modelKey?: string
-  reasoningLevel?: 'low' | 'mid' | 'high'
+  reasoningLevel?: 'low' | 'mid' | 'high' | 'xhigh' | 'max'
   skill?: DoubaoSkillName
   deepThink?: boolean
 } {
@@ -262,25 +292,37 @@ function requestOptions(parsed: InboundChatRequest): {
    * emits it while `deepThink` is `undefined`. Passing a boolean here would
    * silently downgrade every task turn to the chat shape.
    */
-  const think = isTaskModel(parsed.model)
-    ? {}
-    : { deepThink: process.env.DSH_DOUBAO_DEEP_THINK !== '0' }
   // 「豆包 生图」 is a DSH-side alias, not a Doubao model_item_key: Doubao has no
   // model by that name. Selecting it runs an ordinary chat turn under the
   // imageGen skill, which is what makes the reply carry a creation block. The
-  // carrier model is the app's own default.
-  if (parsed.model === DOUBAO_IMAGE_MODEL_ID) {
+  // carrier model is the app's own default, with deepThink forced off so
+  // Seedream draws immediately instead of reasoning or answering in text.
+  if (isImageModel(parsed.model)) {
     return {
       modelKey: SKILL_CARRIER_MODEL_ID,
       skill: 'imageGen',
-      ...think,
-      ...level === undefined ? {} : { reasoningLevel: level },
+      deepThink: false,
     }
   }
+  // A model the client menu discovered but this release's static catalog does not
+  // name is still a real key, and its mode comes with it: the third-party models
+  // are filed under 工作任务 (mode_id "3") with no 「工作任务」 prefix to spot them.
+  const discovered = liveModels().find((model) => model.id === parsed.model)
+  const taskModel = isTaskModel(parsed.model) || discovered?.taskMode === true
+  const think = taskModel
+    ? {}
+    : {
+        deepThink: parsed.reasoning_effort === 'off'
+          ? false
+          : process.env.DSH_DOUBAO_DEEP_THINK !== '0',
+      }
   return {
     ...think,
     ...parsed.model === undefined ? {} : { modelKey: parsed.model },
     ...level === undefined ? {} : { reasoningLevel: level },
+    // Explicit, so a discovered task model keeps 工作任务 shape (conversation_mode 2,
+    // mode_id 3, 256k token limit) instead of silently becoming an ordinary chat.
+    ...taskModel ? { taskMode: true } : {},
   }
 }
 
@@ -294,8 +336,62 @@ function requestOptions(parsed: InboundChatRequest): {
 export function imageMarkdown(images: readonly DoubaoImage[]): string {
   if (images.length === 0) return ''
   return images
-    .map((image, i) => `![豆包生图 ${i + 1}](${image.url})`)
+    .map((image, i) => `![豆包生图 ${i + 1}](${markdownSafeUrl(image.url)})`)
     .join('\n\n')
+}
+
+/**
+ * IMAGEGEN_LOCAL_FILE: download the picture and reference it locally.
+ *
+ * The Harness renders local files reliably; a signed CDN URL in Markdown shows
+ * up as 「图片无法预览」 (the `~tplv-…` segment breaks link parsing and the
+ * origin may be blocked). Saving the bytes next to the session sidesteps both.
+ *
+ * Returns Markdown with the local path, or the remote URL when the download
+ * fails — a broken preview is better than a missing picture.
+ */
+export async function imageMarkdownLocal(images: readonly DoubaoImage[]): Promise<string> {
+  if (images.length === 0) return ''
+  const dir = join(homedir(), '.dsh', 'doubao-images')
+  const parts: string[] = []
+  for (const [i, image] of images.entries()) {
+    const fallback = `![豆包生图 ${i + 1}](${markdownSafeUrl(image.url)})`
+    try {
+      const res = await fetch(image.url)
+      if (!res.ok) {
+        parts.push(fallback)
+        continue
+      }
+      const buf = Buffer.from(await res.arrayBuffer())
+      mkdirSync(dir, { recursive: true })
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+      const file = join(dir, `doubao-${stamp}-${i + 1}.png`)
+      writeFileSync(file, buf)
+      parts.push(`![豆包生图 ${i + 1}](${file.replace(/\\/g, '/')})`)
+    } catch {
+      parts.push(fallback)
+    }
+  }
+  return parts.join('\n\n')
+}
+
+/**
+ * IMAGEGEN_URL_SAFE: make a CDN URL survive Markdown link parsing.
+ *
+ * Doubao's signed URLs carry `~tplv-…` and `x-signature=…%3D`. A bare `~` is the
+ * strikethrough marker, so the link breaks and the Harness renders
+ * 「图片无法预览：*」 instead of the picture. Percent-encoding the path segment
+ * keeps the bytes identical while removing the ambiguous characters.
+ */
+function markdownSafeUrl(raw: string): string {
+  if (typeof raw !== 'string' || raw === '') return ''
+  // Split query off so its separators are not re-encoded.
+  const q = raw.indexOf('?')
+  const path = q === -1 ? raw : raw.slice(0, q)
+  const query = q === -1 ? '' : raw.slice(q)
+  const safePath = path.replace(/~/g, '%7E').replace(/\(/g, '%28').replace(/\)/g, '%29')
+  const safeQuery = query.replace(/\(/g, '%28').replace(/\)/g, '%29')
+  return safePath + safeQuery
 }
 
 /**
@@ -331,17 +427,132 @@ function flattenContent(content: unknown): string {
  * shape the tool contract promises — the model is asked to recognise that prefix,
  * so the two sides must not drift apart.
  */
-function buildPrompt(messages: Array<{ role?: string; content?: unknown; name?: string }> | undefined): string {
+
+/**
+ * Whether this turn targets the image alias.
+ *
+ * DSH may spell the model id with a provider prefix (`doubao/image-gen`) or in
+ * another case; a missed match silently falls back to the full agent prompt,
+ * which is how framework text ended up drawn into the picture.
+ */
+function isImageModel(model: string | undefined): boolean {
+  if (typeof model !== 'string' || model === '') return false
+  const tail = model.includes('/') ? model.slice(model.lastIndexOf('/') + 1) : model
+  return tail.trim().toLowerCase() === DOUBAO_IMAGE_MODEL_ID
+}
+
+/**
+ * IMAGEGEN_PROMPT: pick the sentence the user actually typed.
+ *
+ * The transcript DSH hands us is not just that sentence: it carries the
+ * developer prompt, a runtime snapshot, the skill catalog, the MCP listing and
+ * memory pages, each as its own `user` message. Taking the last user message
+ * therefore picked up a `<system-reminder>` block, and Doubao drew that text
+ * into the picture — the reported "turn 1 step 1 / tup / tun" artefacts.
+ *
+ * A picture description is short and plain, so a message qualifies only when it
+ * is bounded in length and carries no known marker or XML-ish wrapper.
+ */
+const FRAMEWORK_MARKERS = [
+  'Current runtime context',
+  'Current working directory:',
+  'Time sampled while preparing',
+  'Elapsed since the preceding',
+  'Available skills:',
+  '[Plugin context from',
+  '[the previous turn was interrupted',
+  '<system-reminder>',
+  '<available_skills>',
+  '<mcp_catalog>',
+  '<hindsight_pages>',
+  '<hindsight_page_refresh>',
+  '<hindsight_knowledge',
+  'A skill is a reusable set of task-specific instructions',
+  'The following MCP servers are available',
+  'You are an AI agent powered by',
+]
+
+/** Anything longer than this is machine context, not a picture request. */
+const MAX_IMAGE_PROMPT_CHARS = 2000
+
+function stripInjectedBlocks(text: string): string {
+  return text
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
+    .replace(/<hindsight_page_refresh>[\s\S]*?<\/hindsight_page_refresh>/g, '')
+    .trim()
+}
+
+function looksLikeFramework(text: string): boolean {
+  const head = text.slice(0, 400)
+  if (head.startsWith('<')) return true
+  if (/^[<\[]/.test(head) && head.includes('>')) return true
+  return FRAMEWORK_MARKERS.some((marker) => head.includes(marker))
+}
+
+export function buildImagePrompt(
+  all: ReadonlyArray<{ role?: string; content?: unknown; name?: string }>,
+  outgoing: ReadonlyArray<{ role?: string; content?: unknown; name?: string }>,
+): string {
+  const source = all.length > 0 ? all : outgoing
+  let fallback = ''
+  for (let i = source.length - 1; i >= 0; i -= 1) {
+    const message = source[i]
+    if (message === undefined) continue
+    if ((message.role ?? 'user') !== 'user') continue
+    const text = stripInjectedBlocks(flattenContent(message.content))
+    if (text === '' || looksLikeFramework(text)) continue
+    if (text.length <= MAX_IMAGE_PROMPT_CHARS) return text
+    if (fallback === '') fallback = text.slice(0, MAX_IMAGE_PROMPT_CHARS)
+  }
+  return fallback
+}
+
+function buildPrompt(
+  messages: Array<{
+    role?: string
+    content?: unknown
+    name?: string
+    tool_calls?: TokenizableToolCall[]
+  }> | undefined,
+): string {
   if (!Array.isArray(messages) || messages.length === 0) return ''
   const turns: string[] = []
   for (const message of messages) {
     const text = flattenContent(message.content)
-    if (!text) continue
     const role = message.role ?? 'user'
     if (role === 'tool') {
-      turns.push(toolResultAsText(message.name, text))
+      if (text) turns.push(toolResultAsText(message.name, text))
       continue
     }
+    // Replay an assistant turn that carried tool calls back into the prompt as
+    // the same ```doubao-tool fence the model is asked to emit, so a continued
+    // conversation keeps the call/result pairing the emulation depends on. An
+    // assistant message can have empty content but non-empty tool_calls, so this
+    // branch must run BEFORE the empty-text skip below.
+    if (role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+      const fencedCalls = message.tool_calls
+        .map((tc) => {
+          const fnName = tc.function?.name ?? ''
+          const rawArgs = tc.function?.arguments
+          // arguments is typed `unknown` (OpenAI wire = JSON string, but a caller
+          // may hand us an already-parsed object). Only parse when it is a string.
+          let parsedArgs: unknown = rawArgs ?? {}
+          if (typeof rawArgs === 'string') {
+            try {
+              parsedArgs = JSON.parse(rawArgs)
+            } catch {
+              /* keep the raw string when it is not valid JSON */
+            }
+          }
+          return `\`\`\`doubao-tool\n${JSON.stringify({ name: fnName, arguments: parsedArgs })}\n\`\`\``
+        })
+        .join('\n\n')
+      const trimmed = text.trim()
+      const combined = trimmed ? `${trimmed}\n\n${fencedCalls}` : fencedCalls
+      turns.push(`[assistant] ${combined}`)
+      continue
+    }
+    if (!text) continue
     turns.push(role === 'user' ? text : `[${role}] ${text}`)
   }
   return turns.join('\n\n')
@@ -357,6 +568,8 @@ export interface DoubaoShimOptions {
    * setting without restarting the host.
    */
   toolEmulation?: () => boolean
+  /** Optional shared stats tracker; defaults to a per-shim instance. */
+  stats?: DoubaoStatsTracker
 }
 
 /**
@@ -451,9 +664,10 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
    * Kept per shim (i.e. per host process) — a restart simply starts new threads.
    */
   const sessions = new ConversationStore()
+  const statsTracker = options.stats ?? new DoubaoStatsTracker()
 
-  /** Opt-in prompt-level tool calling; off unless the setting says otherwise. */
-  const emulationOn = options.toolEmulation ?? (() => false)
+  /** Prompt-level tool calling; ON by default so Doubao can drive local tools. */
+  const emulationOn = options.toolEmulation ?? (() => true)
 
   // Per-process shared secret. In memory only; pi-ai sends it as
   // `Authorization: Bearer`, the shim validates it, and it is never
@@ -565,6 +779,13 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
       /** True when the request's client disconnected before we finished. */
       clientGone: () => boolean
     },
+    accounting: {
+      modelId: string
+      sessionKey: string | undefined
+      isContinuationTurn: boolean
+      cachedPrefixMessages: number
+      emulatedContractText: string
+    },
   ): Promise<void> {
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -572,10 +793,27 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
       connection: 'keep-alive',
     })
 
-    const send = (payload: unknown): void => {
+    const chunkId = `doubao-${randomBytes(8).toString('hex')}`
+    const created = Math.floor(Date.now() / 1000)
+    const chatStartedAt = Date.now()
+    let firstTokenAt: number | null = null
+    const markFirstToken = (): void => {
+      if (firstTokenAt === null) firstTokenAt = Date.now()
+    }
+
+    const sendRaw = (payload: unknown): void => {
       if (!res.writableEnded && !res.destroyed) {
         res.write(`data: ${JSON.stringify(payload)}\n\n`)
       }
+    }
+    const sendChunk = (payload: { choices: unknown[]; usage?: unknown }): void => {
+      sendRaw({
+        id: chunkId,
+        object: 'chat.completion.chunk',
+        created,
+        model: accounting.modelId,
+        ...payload,
+      })
     }
 
     let roleSent = false
@@ -590,37 +828,44 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
           // which is the right degradation.
           onThinking: (delta) => {
             lifecycle.onActivity()
+            if (delta !== '') markFirstToken()
             if (!roleSent) {
-              send({ choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })
+              sendChunk({ choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })
               roleSent = true
             }
-            send({ choices: [{ index: 0, delta: { reasoning_content: delta }, finish_reason: null }] })
+            sendChunk({ choices: [{ index: 0, delta: { reasoning_content: delta }, finish_reason: null }] })
           },
           onText: (delta) => {
             lifecycle.onActivity()
             // In emulated mode the fence is still forming, so nothing can be
             // forwarded live; the whole turn is parsed after it completes.
             if (emulate) return
+            if (delta !== '') markFirstToken()
             if (!roleSent) {
-              send({ choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })
+              sendChunk({ choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })
               roleSent = true
             }
-            send({ choices: [{ index: 0, delta: { content: delta }, finish_reason: null }] })
+            sendChunk({ choices: [{ index: 0, delta: { content: delta }, finish_reason: null }] })
           },
         },
       })
       // Only a completed turn teaches us the thread id; a failed one leaves the
       // previous mapping alone so the next attempt can still continue it.
       remember(result.conversationId)
-      if (!roleSent) send({ choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })
+      if (!roleSent) sendChunk({ choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })
 
       let finishReason = 'stop'
+      let visibleAnswerText = result.text
+      let calls: EmulatedToolCall[] = []
       if (emulate) {
-        const { calls, text } = parseToolCalls(result.text)
-        const visible = text.trim() === '' ? ' ' : text
-        send({ choices: [{ index: 0, delta: { content: visible }, finish_reason: null }] })
+        const parsedCalls = parseToolCalls(result.text)
+        calls = parsedCalls.calls
+        visibleAnswerText = parsedCalls.text
+        const visible = parsedCalls.text.trim() === '' ? ' ' : parsedCalls.text
+        if (parsedCalls.text.trim() !== '' || calls.length > 0) markFirstToken()
+        sendChunk({ choices: [{ index: 0, delta: { content: visible }, finish_reason: null }] })
         calls.forEach((call: EmulatedToolCall, index: number) => {
-          send({
+          sendChunk({
             choices: [{
               index: 0,
               delta: {
@@ -640,17 +885,61 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
       // Generated images have no place on the OpenAI assistant side, so they are
       // appended to the text as Markdown — which is both what the user sees and
       // what lets the Harness fetch the file afterwards.
-      const markdown = imageMarkdown(result.images)
+      const markdown = await imageMarkdownLocal(result.images)
       if (markdown !== '') {
-        send({ choices: [{ index: 0, delta: { content: `\n\n${markdown}` }, finish_reason: null }] })
+        markFirstToken()
+        sendChunk({ choices: [{ index: 0, delta: { content: `\n\n${markdown}` }, finish_reason: null }] })
       }
-      send({ choices: [{ index: 0, delta: {}, finish_reason: finishReason }] })
+      sendChunk({ choices: [{ index: 0, delta: {}, finish_reason: finishReason }] })
+
+      const completedAt = Date.now()
+      const answerForUsage = [visibleAnswerText, markdown].filter((part) => part !== '').join('\n\n')
+      const usage = resolveChatUsage({
+        messages: parsed.messages ?? [],
+        ...(parsed.tools !== undefined ? { tools: parsed.tools } : {}),
+        ...(accounting.emulatedContractText !== '' ? { emulatedContractText: accounting.emulatedContractText } : {}),
+        cachedPrefixMessages: accounting.cachedPrefixMessages,
+        answerText: answerForUsage,
+        ...(result.reasoningText !== undefined ? { reasoningText: result.reasoningText } : {}),
+        ...(calls.length > 0 ? { toolCalls: calls } : {}),
+      })
+      const ttftMs = firstTokenAt === null ? null : Math.max(0, firstTokenAt - chatStartedAt)
+      const decodeMs = firstTokenAt === null ? 0 : Math.max(0, completedAt - firstTokenAt)
+      const durationMs = Math.max(0, completedAt - chatStartedAt)
+      statsTracker.recordSuccess({
+        model: accounting.modelId,
+        ...(accounting.sessionKey !== undefined ? { sessionKey: accounting.sessionKey } : {}),
+        stream: true,
+        continuation: accounting.isContinuationTurn,
+        usage,
+        ttftMs,
+        durationMs,
+        decodeMs,
+        ...(result.telemetry?.contextWindowUsage !== undefined
+          ? { upstreamContextWindow: result.telemetry.contextWindowUsage }
+          : {}),
+        ...(result.telemetry?.firstPacketCostMs !== undefined
+          ? { upstreamFirstPacketMs: result.telemetry.firstPacketCostMs }
+          : {}),
+        ...(result.telemetry?.ackCostMs !== undefined
+          ? { upstreamAckMs: result.telemetry.ackCostMs }
+          : {}),
+        now: completedAt,
+      })
+
+      if (parsed.stream_options?.include_usage !== false) {
+        sendChunk({ choices: [], usage: usage.openai })
+      }
       if (!res.writableEnded) {
         res.write('data: [DONE]\n\n')
         res.end()
       }
       void result
     } catch (error) {
+      statsTracker.recordFailure({
+        model: accounting.modelId,
+        durationMs: Math.max(0, Date.now() - chatStartedAt),
+      })
       const kind: DoubaoErrorKind = error instanceof DoubaoUpstreamError
         ? classifyDoubaoFailure(error)
         : 'network'
@@ -667,7 +956,7 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
       if (lifecycle.clientGone()) return
       // The response has already begun, so the failure can only be reported
       // inside the stream. An error chunk is what pi-ai surfaces to the user.
-      send({
+      sendRaw({
         error: {
           message: (error as Error)?.message ?? 'Doubao upstream failed',
           type: errorCodeFor(kind, isRetryableFailure(error)),
@@ -777,9 +1066,12 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
       // this turn adds. A continuation sends only that delta plus the id the
       // server issued last time; anything uncertain starts a new conversation,
       // which is the previous behaviour and never worse.
+      const imageModel = isImageModel(parsed.model)
       const sessionKey = sessionKeyOf(parsed.messages)
       const known = sessions.get(sessionKey)
-      const continuing = isContinuation(parsed.messages, known)
+      // Image turns run standalone under `imageGen`; reusing a prior text or task
+      // conversationId carries old mode/refusal context and causes text replies.
+      const continuing = !imageModel && isContinuation(parsed.messages, known)
       /**
        * What to send.
        *
@@ -794,7 +1086,12 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
       const useDelta = delta.length > 0
       const isContinuationTurn = continuing && useDelta
       const outgoing = useDelta ? delta : (parsed.messages ?? [])
-      const promptBody = buildPrompt(outgoing)
+      // IMAGEGEN_SLIM_PROMPT: 生图模型只该看到用户那句描述。
+      // 完整上下文（系统提示、工具清单、MCP、技能、历史）会让它先分析"该用哪个工具"，
+      // 实测白等 1 分 54 秒才出图。这里只取最后一条 user 消息。
+      const promptBody = imageModel
+        ? buildImagePrompt(parsed.messages ?? [], outgoing)
+        : buildPrompt(outgoing)
       if (!promptBody) {
         writeOpenAIError(res, 400, 'invalid_request', 'no usable message content')
         return
@@ -802,20 +1099,31 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
       /**
        * Tool emulation: the declared tools become part of the PROMPT, because
        * Doubao ignores the real `tools` field outright (measured — it answered
-       * with its own server-side search skill instead).
+       * with its own server-side search skill instead). Never append tool schemas
+       * to image-generation prompts, or Doubao replies in text instead of drawing.
        */
-      const emulate = emulationOn() && (parsed.tools?.length ?? 0) > 0
+      const emulate = !imageModel && emulationOn() && (parsed.tools?.length ?? 0) > 0
+      const emulatedContractText = emulate ? buildToolContract(parsed.tools ?? []) : ''
       const prompt = emulate
-        ? `${promptBody}${buildToolContract(parsed.tools ?? [])}`
+        ? `${promptBody}${emulatedContractText}`
         : promptBody
       // Diagnosis for "why did it answer something unrelated": the prompt is the
       // only thing we control, so being able to see exactly what went upstream is
       // the difference between debugging and guessing.
       if (process.env.DSH_DOUBAO_DEBUG_PROMPT === '1') {
-        process.stderr.write(
-          `[prompt] chars=${prompt.length} tools=${parsed.tools?.length ?? 0} emulate=${emulate}\n` +
-          `${prompt.slice(0, 1200)}\n---\n`,
-        )
+        const raw = JSON.stringify((parsed.messages ?? []).map((m) => ({
+          r: m.role,
+          t: flattenContent(m.content).slice(0, 200),
+        })))
+        const line = `[prompt] model=${String(parsed.model)} chars=${prompt.length} `
+          + `tools=${parsed.tools?.length ?? 0} emulate=${emulate} msgs=${(parsed.messages ?? []).length}\n`
+          + `RAW=${raw}\n${prompt.slice(0, 2000)}\n---\n`
+        process.stderr.write(line)
+        try {
+          appendFileSync(join(homedir(), '.dsh', 'doubao-prompt.log'), line)
+        } catch {
+          /* diagnostics must never break the request */
+        }
       }
       // ---- cancellation & liveness -------------------------------------
       //
@@ -832,7 +1140,7 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
       }
       /** Record the thread id the server handed back, for the next turn. */
       const remember = (conversationId: string | undefined): void => {
-        if (conversationId !== undefined) {
+        if (!imageModel && conversationId !== undefined) {
           sessions.remember(sessionKey, conversationId, (parsed.messages?.length ?? 0) + 1)
         }
       }
@@ -847,24 +1155,66 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
         )
       }
 
+      // What we actually sent upstream: the inbound id run through the
+      // catalog, so an unknown id degrades to the default instead of being
+      // echoed back as if it had been honoured.
+      const sent = findDoubaoModel(parsed.model)
+      const cachedPrefixMessages = isContinuationTurn && known !== undefined ? known.messageCount : 0
+
       if (parsed.stream === false) {
-        const result = await chat(prompt, upstreamOptions)
+        const chatStartedAt = Date.now()
+        let result
+        try {
+          result = await chat(prompt, upstreamOptions)
+        } catch (error) {
+          statsTracker.recordFailure({
+            model: sent.id,
+            durationMs: Math.max(0, Date.now() - chatStartedAt),
+          })
+          throw error
+        }
+        const completedAt = Date.now()
         remember(result.conversationId)
         // Same contract as the streaming path: the fence is parsed out of the
         // visible text and becomes tool_calls, never prose the user must read.
         const emulated = emulate ? parseToolCalls(result.text) : { calls: [], text: result.text }
         const content = [
           emulated.text,
-          result.images.length > 0 ? imageMarkdown(result.images) : '',
+          result.images.length > 0 ? await imageMarkdownLocal(result.images) : '',
         ].filter((part) => part !== '').join('\n\n')
-        // What we actually sent upstream: the inbound id run through the
-        // catalog, so an unknown id degrades to the default instead of being
-        // echoed back as if it had been honoured.
-        const sent = findDoubaoModel(parsed.model)
+        const usage = resolveChatUsage({
+          messages: parsed.messages ?? [],
+          ...(parsed.tools !== undefined ? { tools: parsed.tools } : {}),
+          ...(emulatedContractText !== '' ? { emulatedContractText } : {}),
+          cachedPrefixMessages,
+          answerText: content,
+          ...(result.reasoningText !== undefined ? { reasoningText: result.reasoningText } : {}),
+          ...(emulated.calls.length > 0 ? { toolCalls: emulated.calls } : {}),
+        })
+        statsTracker.recordSuccess({
+          model: sent.id,
+          ...(sessionKey !== undefined ? { sessionKey } : {}),
+          stream: false,
+          continuation: isContinuationTurn,
+          usage,
+          ttftMs: null,
+          durationMs: Math.max(0, completedAt - chatStartedAt),
+          decodeMs: 0,
+          ...(result.telemetry?.contextWindowUsage !== undefined
+            ? { upstreamContextWindow: result.telemetry.contextWindowUsage }
+            : {}),
+          ...(result.telemetry?.firstPacketCostMs !== undefined
+            ? { upstreamFirstPacketMs: result.telemetry.firstPacketCostMs }
+            : {}),
+          ...(result.telemetry?.ackCostMs !== undefined
+            ? { upstreamAckMs: result.telemetry.ackCostMs }
+            : {}),
+          now: completedAt,
+        })
         writeJson(res, 200, {
-          id: `doubao-${Date.now()}`,
+          id: `doubao-${completedAt}`,
           object: 'chat.completion',
-          created: Math.floor(Date.now() / 1000),
+          created: Math.floor(completedAt / 1000),
           // Doubao's reply carries no model identifier we can read back, so
           // this field is a REQUEST-side record and nothing more. The name is
           // repeated in `requested_model` because a bare key like "0" or
@@ -876,6 +1226,7 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
             message: {
               role: 'assistant',
               content: content === '' ? ' ' : content,
+              ...(result.reasoningText !== '' ? { reasoning_content: result.reasoningText } : {}),
               ...(emulated.calls.length > 0
                 ? {
                     tool_calls: emulated.calls.map((call) => ({
@@ -888,6 +1239,7 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
             },
             finish_reason: emulated.calls.length > 0 ? 'tool_calls' : 'stop',
           }],
+          usage: usage.openai,
         })
         return
       }
@@ -897,6 +1249,13 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
         () => sessions.forget(sessionKey),
         emulate,
         { signal, onActivity, clientGone },
+        {
+          modelId: sent.id,
+          sessionKey,
+          isContinuationTurn,
+          cachedPrefixMessages,
+          emulatedContractText,
+        },
       )
     } catch (error) {
       writeFailure(res, error)
@@ -914,6 +1273,8 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
     baseUrl,
     baseUrlSync,
     token: () => SHARED_SECRET,
+    stats: () => statsTracker.snapshot(sessions.size),
+    resetStats: () => { statsTracker.reset() },
     async close() {
       await ready.catch(() => {})
       // `server.close()` only stops accepting; it waits for every live
