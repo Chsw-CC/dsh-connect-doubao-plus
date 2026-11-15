@@ -215,12 +215,12 @@ DSH (pi-ai provider)
 
 ```bash
 # ① install the packaged tarball from the GitHub release (recommended)
-dsh plugin --profile desktop add "path\\dsh-connect-doubao-plus-0.9.0.tgz"
+dsh plugin --profile desktop add "path\dsh-connect-doubao-plus-0.9.0.tgz"
 
 # ② local development (links the source directory)
 git clone https://github.com/Chsw-CC/dsh-connect-doubao-plus.git
 cd dsh-connect-doubao-plus && npm i && npm run build
-dsh plugin --profile desktop add "path\\dsh-connect-doubao-plus"
+dsh plugin --profile desktop add "path\dsh-connect-doubao-plus"
 ```
 
 > Option ② writes a `link:` dependency — after editing the sources, just run
