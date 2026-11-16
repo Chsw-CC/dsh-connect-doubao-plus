@@ -4,7 +4,20 @@
 
 ---
 
-## 0.9.0 — 2026-11-15
+## 0.10.0 — 2026-11-16
+
+> 豆包改版适配：免费体验套餐的限额窗口从「5 小时 + 周」改为**单个月度窗口**（window_type 4）。
+
+### 新增
+
+- **月度额度窗口**：`window_type 4` 映射为 `monthly`，额度看板新增「月度额度 / Monthly quota」进度条，
+  含已用百分比与重置倒计时；`/quota` 路由、shim 镜像与 `doctor` / `probe` 输出同步透传。
+  5 小时与周额度条保留，仍在下发这两类窗口的账号不受影响。
+
+### 修复
+
+- **登录态迁移**：0.4.x 遗留的 `doubao-credentials.dpapi` 密封缓存（0.5.0 起废弃不再读取）中
+  仍有效的浏览器会话被恢复到当前的 `doubao-credentials-browser.dpapi`，老用户无需重新扫码。
 
 > 更名版本：fork 从 `dsh-connect-doubao` 改为 **`dsh-connect-doubao-plus`**，
 > 仓库同步改为 [Chsw-CC/dsh-connect-doubao-plus](https://github.com/Chsw-CC/dsh-connect-doubao-plus)，
