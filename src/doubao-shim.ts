@@ -1092,36 +1092,18 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
       // Read-only quota view for the plugin UI. Never returns credentials.
       if (req.method === 'GET' && url.startsWith('/quota')) {
         const quota = await fetchQuota()
-        const fiveHour = findWindow(quota, 'five_hour')
-        const weekly = findWindow(quota, 'weekly')
         const monthly = findWindow(quota, 'monthly')
         writeJson(res, 200, {
           ok: true,
           plan: quota.plan ?? null,
           exhausted: quota.exhausted,
           windows: {
-            fiveHour: fiveHour
-              ? {
-                  usedPercent: fiveHour.usedPercent,
-                  remainingPercent: fiveHour.remainingPercent,
-                  resetsAt: fiveHour.resetsAt,
-                  resetsInMs: millisUntilReset(fiveHour),
-                }
-              : null,
             monthly: monthly
               ? {
                   usedPercent: monthly.usedPercent,
                   remainingPercent: monthly.remainingPercent,
                   resetsAt: monthly.resetsAt,
                   resetsInMs: millisUntilReset(monthly),
-                }
-              : null,
-            weekly: weekly
-              ? {
-                  usedPercent: weekly.usedPercent,
-                  remainingPercent: weekly.remainingPercent,
-                  resetsAt: weekly.resetsAt,
-                  resetsInMs: millisUntilReset(weekly),
                 }
               : null,
           },

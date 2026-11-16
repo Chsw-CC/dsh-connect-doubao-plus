@@ -109,8 +109,6 @@ async function main(): Promise<number> {
         : `${window.usedPercent}%`
     return `${window.label ?? 'bonus'}: ${amounts} used, ${formatDuration(millisUntilReset(window))} to expiry`
   }
-  const fiveHour = findWindow(quota, 'five_hour')
-  const weekly = findWindow(quota, 'weekly')
   const monthly = findWindow(quota, 'monthly')
   const grant = findWindow(quota, 'incentive')
   out(options.json
@@ -122,9 +120,6 @@ async function main(): Promise<number> {
         monthly: monthly
           ? { usedPercent: monthly.usedPercent, remainingPercent: monthly.remainingPercent, resetsIn: formatDuration(millisUntilReset(monthly)) }
           : null,
-        fiveHour: fiveHour
-          ? { usedPercent: fiveHour.usedPercent, remainingPercent: fiveHour.remainingPercent, resetsIn: formatDuration(millisUntilReset(fiveHour)) }
-          : null,
         grant: grant
           ? {
               label: grant.label ?? null,
@@ -134,16 +129,11 @@ async function main(): Promise<number> {
               resetsIn: formatDuration(millisUntilReset(grant)),
             }
           : null,
-        weekly: weekly
-          ? { usedPercent: weekly.usedPercent, remainingPercent: weekly.remainingPercent, resetsIn: formatDuration(millisUntilReset(weekly)) }
-          : null,
         error: quota.error ?? null,
       }
       : [
           `quota: ${quota.plan ?? 'unknown plan'}${quota.planActive === false ? ' (inactive)' : ''}`,
-          `  5-hour limit : ${describeWindow(fiveHour)}`,
-  `  monthly quota : ${describeWindow(monthly)}`,
-          `  weekly quota : ${describeWindow(weekly)}`,
+          `  monthly quota : ${describeWindow(monthly)}`,
           `  bonus quota  : ${describeGrant(grant)}`,
         ].join('\n'))
 

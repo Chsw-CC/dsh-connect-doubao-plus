@@ -44,8 +44,6 @@ export interface DoubaoQuotaView {
   /** True when Doubao reports all entitlements consumed. */
   exhausted: boolean
   windows: {
-    fiveHour: DoubaoQuotaWindowView | null
-    weekly: DoubaoQuotaWindowView | null
     monthly: DoubaoQuotaWindowView | null
     /** Promotional grants ("活动赠送额度"); usually zero or one. */
     incentive: DoubaoQuotaWindowView[]

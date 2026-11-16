@@ -154,8 +154,6 @@ export interface DoubaoQuotaView {
   plan: string | null
   exhausted: boolean
   windows: {
-    fiveHour: QuotaWindowView | null
-    weekly: QuotaWindowView | null
     monthly: QuotaWindowView | null
     /** Promotional grants ("活动赠送额度"); usually zero or one. */
     incentive: QuotaWindowView[]
@@ -188,8 +186,6 @@ function viewOf(window: QuotaWindow | undefined): QuotaWindowView | null {
 
 export async function doubaoQuotaView(options: { force?: boolean } = {}): Promise<DoubaoQuotaView> {
   const quota = await fetchQuota(options.force === true ? { force: true } : {})
-  const fiveHour = findWindow(quota, 'five_hour')
-  const weekly = findWindow(quota, 'weekly')
   const monthly = findWindow(quota, 'monthly')
   return {
     ok: quota.error === undefined,
@@ -197,8 +193,6 @@ export async function doubaoQuotaView(options: { force?: boolean } = {}): Promis
     plan: quota.plan ?? null,
     exhausted: quota.exhausted,
     windows: {
-      fiveHour: viewOf(fiveHour),
-      weekly: viewOf(weekly),
       monthly: viewOf(monthly),
       incentive: quota.windows
         .filter((window) => window.type === 'incentive')

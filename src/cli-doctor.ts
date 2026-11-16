@@ -188,26 +188,22 @@ export async function runDoctor(): Promise<DoctorReport> {
           : `${window.usedPercent}%`
       return `${window.label ?? 'bonus'} ${amounts}, ${formatDuration(millisUntilReset(window))} to expiry`
     }
-    const fiveHour = findWindow(quota, 'five_hour')
-    const weekly = findWindow(quota, 'weekly')
     const monthly = findWindow(quota, 'monthly')
     const grant = findWindow(quota, 'incentive')
     const view = await doubaoQuotaView()
     checks.push({
       name: 'quota',
-      // A plan that simply does not HAVE a five-hour window is healthy — the
+      // A plan that does not report a monthly window (yet) is healthy — the
       // account shape is not a plugin failure, and reporting it as one sent
       // the reader hunting for a bug in the mapping.
       status: quota.error === undefined ? 'ok' : 'fail',
       detail:
         quota.error ??
-        `${quota.plan ?? 'unknown plan'}; 5-hour=${describeWindow(fiveHour)}; monthly=${describeWindow(monthly)}; weekly=${describeWindow(weekly)}; bonus=${describeGrant(grant)}`,
+        `${quota.plan ?? 'unknown plan'}; monthly=${describeWindow(monthly)}; bonus=${describeGrant(grant)}`,
       data: {
         plan: quota.plan ?? null,
         exhausted: quota.exhausted,
-        fiveHourPercent: fiveHour?.usedPercent ?? null,
         monthlyPercent: monthly?.usedPercent ?? null,
-        weeklyPercent: weekly?.usedPercent ?? null,
         grantPercent: grant?.usedPercent ?? null,
         grantUsedAmount: grant?.usedAmount ?? null,
         grantTotalAmount: grant?.totalAmount ?? null,

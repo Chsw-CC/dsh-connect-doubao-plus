@@ -5,7 +5,7 @@
 > (task-mode models spend the paid membership quota), with **chain-of-thought reasoning
 > passthrough**, **native DSH Token usage and session stats**, **Seedream image generation**,
 > plus a **read-only** quota panel
-> (5-hour window / weekly window / activity grant, each with a reset countdown).
+> (monthly window / activity grant, each with a reset countdown).
 > There is exactly one way in: **one browser QR sign-in**. Windows / macOS / Linux
 > are all supported — the session is sealed locally with Windows DPAPI, or with
 > AES-256-GCM under a local 0600 key on other platforms.
@@ -70,8 +70,9 @@ With no session the plugin fails loudly ("还没有浏览器登录态…") rathe
 - **Tool-call emulation on by default** (0.7.1) — Doubao can drive DSH's local tools:
   OpenAI `tools` → ```doubao-tool fences → `tool_calls`, parsing JSON arrays, OpenAI
   nested shapes and ```json fences.
-- **Read-only quota panel** — 5-hour, weekly and activity-grant windows as bars, each
-  with a **reset countdown**; manual refresh plus a 5-minute automatic poll.
+- **Read-only quota panel** — monthly and activity-grant windows as bars, each with a
+  **reset countdown** (the legacy 5-hour / weekly buckets are no longer reported by
+  Doubao, so the panel dropped them); manual refresh plus a 5-minute automatic poll.
 - **Model checklist** — ticked entries appear in DSH's model picker and are sent as
   `model_item_key`.
 - **Account status line** — distinguishes signed in / not signed in / sign-in could

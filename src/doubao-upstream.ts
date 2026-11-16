@@ -1811,7 +1811,7 @@ export async function chat(
  *                    bandwidth limit and NOT transient: the user must clear it
  *                    once in the Doubao client. Retrying in place makes the
  *                    challenge stricter, so this never enters the retry set.
- *   quota_exhausted  the account's 5-hour or weekly window is spent.
+ *   quota_exhausted  the account's quota windows (monthly / grant) are spent.
  *   session_dead     credentials unreadable, or the server answers with its
  *                    "session expired" business code. Fix: sign in again.
  *   network          transport failure or timeout.

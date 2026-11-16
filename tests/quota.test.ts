@@ -6,9 +6,10 @@ import { findWindow, millisUntilReset, normalizeWindow, type DoubaoQuota } from 
  * The payload shapes this account actually receives, captured from the live
  * quota endpoint and read off the Doubao panel.
  *
- * - `window_limit_section` → one weekly window, `start_time`/`end_time` both 0,
- *   amounts "0" / "2,100". The app renders this as 「近 7 天 · 开始使用后计时」,
- *   i.e. the window opens on first use and has NO reset instant to show.
+ * - `window_limit_section` → one monthly window (window_type 4), `start_time` 0
+ *   and a real `end_time` ~8.75 days out — opens on first use, resets later.
+ *   (Older plan shapes reported window_type 1/2 with both timestamps 0; those
+ *   types are no longer modeled, and the window below pins the current shape.)
  * - `incentive_quota_section` → the 「活动赠送额度」 grant: 782 of 1,600 used,
  *   an `end_time` (11月21日 09:46) but no `start_time`.
  *
@@ -16,15 +17,15 @@ import { findWindow, millisUntilReset, normalizeWindow, type DoubaoQuota } from 
  * was invisible) and invented a reset instant from the nominal window length
  * (so the card counted down to a moment the server never sent).
  */
-const WEEKLY_ONLY = {
-  end_time: 0,
+const MONTHLY = {
+  end_time: 1_797_220_000_000,
   start_time: 0,
   item_type: 0,
   less_than_one_percent: false,
-  total_amount: '2,100',
-  used_amount: '0',
-  used_percent: 0,
-  window_type: 2,
+  total_amount: '9,000',
+  used_amount: '9,000',
+  used_percent: 100,
+  window_type: 4,
 }
 
 const BONUS_GRANT = {
@@ -47,22 +48,21 @@ function quotaOf(...windows: ReturnType<typeof normalizeWindow>[]): DoubaoQuota 
 }
 
 describe('normalizeWindow', () => {
-  it('keeps the weekly window and never invents a reset instant', () => {
-    const window = normalizeWindow(WEEKLY_ONLY)
+  it('maps window_type 4 to the monthly window', () => {
+    const window = normalizeWindow(MONTHLY)
     expect(window).toBeDefined()
-    expect(window?.type).toBe('weekly')
-    expect(window?.usedPercent).toBe(0)
-    expect(window?.remainingPercent).toBe(100)
-    // No timestamps means the instant is unknown — not "seven days from now".
-    expect(window?.resetUnknown).toBe(true)
-    expect(window?.resetsAt).toBe(0)
-    expect(window?.windowMs).toBe(0)
+    expect(window?.type).toBe('monthly')
+    expect(window?.usedPercent).toBe(100)
+    expect(window?.remainingPercent).toBe(0)
+    expect(window?.resetsAt).toBe(MONTHLY.end_time)
+    // start_time 0 means "opens on first use": the expiry is real.
+    expect(window?.startsOnUse).toBe(true)
+    expect(window?.startedAt).toBe(0)
   })
 
-  it('marks a not-yet-started window as starting on first use', () => {
-    const window = normalizeWindow(WEEKLY_ONLY)
-    expect(window?.startsOnUse).toBe(true)
-    expect(millisUntilReset(window!, 1_000)).toBe(0)
+  it('keeps counting down from a real expiry even when the start is missing', () => {
+    const window = normalizeWindow(MONTHLY)
+    expect(millisUntilReset(window!, MONTHLY.end_time - 1_000)).toBe(1_000)
   })
 
   it('reads the promotional grant, with its expiry but no start', () => {
@@ -81,9 +81,9 @@ describe('normalizeWindow', () => {
   })
 
   it('parses the formatted amounts', () => {
-    const window = normalizeWindow(WEEKLY_ONLY)
-    expect(window?.usedAmount).toBe(0)
-    expect(window?.totalAmount).toBe(2100)
+    const window = normalizeWindow(MONTHLY)
+    expect(window?.usedAmount).toBe(9000)
+    expect(window?.totalAmount).toBe(9000)
   })
 
   it('derives the percentage from amounts when used_percent is absent', () => {
@@ -105,7 +105,7 @@ describe('normalizeWindow', () => {
   it('keeps the reported window when both timestamps are real', () => {
     const start = 1_000
     const end = 604_801_000
-    const window = normalizeWindow({ ...WEEKLY_ONLY, start_time: start, end_time: end })
+    const window = normalizeWindow({ ...MONTHLY, start_time: start, end_time: end })
     expect(window?.resetUnknown).toBeUndefined()
     expect(window?.startsOnUse).toBeUndefined()
     expect(window?.resetsAt).toBe(end)
@@ -115,19 +115,23 @@ describe('normalizeWindow', () => {
   })
 
   it('ignores window types it does not model', () => {
-    expect(normalizeWindow({ ...WEEKLY_ONLY, window_type: 9 })).toBeUndefined()
+    // window_type 1/2 were modeled until 2026-11-16; they must stay unmapped.
+    expect(normalizeWindow({ ...MONTHLY, window_type: 9 })).toBeUndefined()
+    expect(normalizeWindow({ ...MONTHLY, window_type: 1 })).toBeUndefined()
+    expect(normalizeWindow({ ...MONTHLY, window_type: 2 })).toBeUndefined()
   })
 })
 
 describe('findWindow', () => {
   it('reports a missing five-hour bucket as undefined, not as zero usage', () => {
-    const quota = quotaOf(normalizeWindow(WEEKLY_ONLY), normalizeWindow(BONUS_GRANT, '活动赠送额度'))
-    expect(findWindow(quota, 'five_hour')).toBeUndefined()
-    expect(findWindow(quota, 'weekly')?.totalAmount).toBe(2100)
+    const quota = quotaOf(normalizeWindow(MONTHLY), normalizeWindow(BONUS_GRANT, '活动赠送额度'))
+    expect(findWindow(quota, 'monthly')?.totalAmount).toBe(9000)
+    // legacy bucket names are gone from the model entirely
+    expect(normalizeWindow({ ...MONTHLY, window_type: 1 })).toBeUndefined()
   })
 
   it('finds the promotional grant in the same list', () => {
-    const quota = quotaOf(normalizeWindow(WEEKLY_ONLY), normalizeWindow(BONUS_GRANT, '活动赠送额度'))
+    const quota = quotaOf(normalizeWindow(MONTHLY), normalizeWindow(BONUS_GRANT, '活动赠送额度'))
     const grant = findWindow(quota, 'incentive')
     expect(grant?.usedAmount).toBe(782)
     expect(grant?.label).toBe('活动赠送额度')

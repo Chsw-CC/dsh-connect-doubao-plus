@@ -204,7 +204,7 @@ function formatRatePercent(rate: number | null): string {
  * is not, or why it is not.
  *
  * "Not started yet" is not the same statement as "unknown": Doubao opens a
- * weekly window on first use, and saying 「开始使用后计时」 is the truth the app
+ * window on first use, and saying 「开始使用后计时」 is the truth the app
  * itself shows, while 「重置时间未知」 would read as a server problem.
  */
 function instantLabel(t: T, resetsInMs: number | null | undefined, kind: 'reset' | 'expire'): string {
@@ -746,17 +746,6 @@ export function DoubaoQuotaCard(props: DoubaoCardProps): ReactElement {
           />
         ))}
         <QuotaBar
-          label={t('quota.fiveHour')}
-          usedPercent={quota?.windows.fiveHour?.usedPercent}
-          resetsInMs={quota?.windows.fiveHour?.resetsInMs}
-          resetsAt={quota?.windows.fiveHour?.resetsAt}
-          startsOnUse={quota?.windows.fiveHour?.startsOnUse}
-          usedAmount={quota?.windows.fiveHour?.usedAmount}
-          totalAmount={quota?.windows.fiveHour?.totalAmount}
-          t={t}
-          now={now}
-        />
-        <QuotaBar
           label={t('quota.monthly')}
           usedPercent={quota?.windows.monthly?.usedPercent}
           resetsInMs={quota?.windows.monthly?.resetsInMs}
@@ -764,17 +753,6 @@ export function DoubaoQuotaCard(props: DoubaoCardProps): ReactElement {
           startsOnUse={quota?.windows.monthly?.startsOnUse}
           usedAmount={quota?.windows.monthly?.usedAmount}
           totalAmount={quota?.windows.monthly?.totalAmount}
-          t={t}
-          now={now}
-        />
-        <QuotaBar
-          label={t('quota.weekly')}
-          usedPercent={quota?.windows.weekly?.usedPercent}
-          resetsInMs={quota?.windows.weekly?.resetsInMs}
-          resetsAt={quota?.windows.weekly?.resetsAt}
-          startsOnUse={quota?.windows.weekly?.startsOnUse}
-          usedAmount={quota?.windows.weekly?.usedAmount}
-          totalAmount={quota?.windows.weekly?.totalAmount}
           t={t}
           now={now}
         />
