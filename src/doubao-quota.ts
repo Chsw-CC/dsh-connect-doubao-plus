@@ -12,6 +12,8 @@
  *   window_type 2 -> weekly quota    (verified: end_time - start_time = 604.8e6 ms)
  *   window_type 3 -> bonus quota     (a promotional grant from `incentive_quota_section`,
  *                                     with an expiry but no start: "activity bonus quota")
+ *   window_type 4 -> monthly quota   (observed 2026-11-16 on 免费体验: `start_time` 0,
+ *                                     `end_time` ~8.75 days out — starts on first use)
  *
  * The window length was confirmed arithmetically from the server's own
  * timestamps rather than inferred from the UI, so the mapping is pinned.
@@ -22,7 +24,7 @@ import { buildHeaders, buildQueryUrl, QUOTA_ENDPOINT } from './doubao-upstream.t
 /** Quota results are cached briefly so a chatty session does not hammer the API. */
 export const QUOTA_TTL_MS = 5 * 60 * 1000
 
-export type QuotaWindowType = 'five_hour' | 'weekly' | 'incentive'
+export type QuotaWindowType = 'five_hour' | 'weekly' | 'monthly' | 'incentive'
 
 export interface QuotaWindow {
   type: QuotaWindowType
@@ -106,6 +108,7 @@ function mapWindowType(value: number): QuotaWindowType | undefined {
   if (value === 1) return 'five_hour'
   if (value === 2) return 'weekly'
   if (value === 3) return 'incentive'
+  if (value === 4) return 'monthly'
   return undefined
 }
 

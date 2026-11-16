@@ -17,6 +17,7 @@ export const zh = {
   'card.navLabel': '豆包',
   'quota.plan': '套餐',
   'quota.fiveHour': '5 小时限额',
+  'quota.monthly': '月度额度',
   'quota.weekly': '周额度',
   'quota.used': '已用 {percent}%',
   'quota.resetsIn': '{time} 后重置',
@@ -126,6 +127,7 @@ export const en: Record<DoubaoCardKey, string> = {
 
   'quota.plan': 'Plan',
   'quota.fiveHour': '5-hour limit',
+  'quota.monthly': 'Monthly quota',
   'quota.weekly': 'Weekly quota',
   'quota.used': '{percent}% used',
   'quota.resetsIn': 'resets in {time}',

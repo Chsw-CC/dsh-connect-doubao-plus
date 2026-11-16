@@ -757,6 +757,17 @@ export function DoubaoQuotaCard(props: DoubaoCardProps): ReactElement {
           now={now}
         />
         <QuotaBar
+          label={t('quota.monthly')}
+          usedPercent={quota?.windows.monthly?.usedPercent}
+          resetsInMs={quota?.windows.monthly?.resetsInMs}
+          resetsAt={quota?.windows.monthly?.resetsAt}
+          startsOnUse={quota?.windows.monthly?.startsOnUse}
+          usedAmount={quota?.windows.monthly?.usedAmount}
+          totalAmount={quota?.windows.monthly?.totalAmount}
+          t={t}
+          now={now}
+        />
+        <QuotaBar
           label={t('quota.weekly')}
           usedPercent={quota?.windows.weekly?.usedPercent}
           resetsInMs={quota?.windows.weekly?.resetsInMs}

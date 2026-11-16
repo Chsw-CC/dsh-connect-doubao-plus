@@ -111,6 +111,7 @@ async function main(): Promise<number> {
   }
   const fiveHour = findWindow(quota, 'five_hour')
   const weekly = findWindow(quota, 'weekly')
+  const monthly = findWindow(quota, 'monthly')
   const grant = findWindow(quota, 'incentive')
   out(options.json
     ? {
@@ -118,6 +119,9 @@ async function main(): Promise<number> {
         plan: quota.plan ?? null,
         planActive: quota.planActive ?? null,
         exhausted: quota.exhausted,
+        monthly: monthly
+          ? { usedPercent: monthly.usedPercent, remainingPercent: monthly.remainingPercent, resetsIn: formatDuration(millisUntilReset(monthly)) }
+          : null,
         fiveHour: fiveHour
           ? { usedPercent: fiveHour.usedPercent, remainingPercent: fiveHour.remainingPercent, resetsIn: formatDuration(millisUntilReset(fiveHour)) }
           : null,
@@ -138,6 +142,7 @@ async function main(): Promise<number> {
       : [
           `quota: ${quota.plan ?? 'unknown plan'}${quota.planActive === false ? ' (inactive)' : ''}`,
           `  5-hour limit : ${describeWindow(fiveHour)}`,
+  `  monthly quota : ${describeWindow(monthly)}`,
           `  weekly quota : ${describeWindow(weekly)}`,
           `  bonus quota  : ${describeGrant(grant)}`,
         ].join('\n'))

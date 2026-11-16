@@ -190,6 +190,7 @@ export async function runDoctor(): Promise<DoctorReport> {
     }
     const fiveHour = findWindow(quota, 'five_hour')
     const weekly = findWindow(quota, 'weekly')
+    const monthly = findWindow(quota, 'monthly')
     const grant = findWindow(quota, 'incentive')
     const view = await doubaoQuotaView()
     checks.push({
@@ -200,11 +201,12 @@ export async function runDoctor(): Promise<DoctorReport> {
       status: quota.error === undefined ? 'ok' : 'fail',
       detail:
         quota.error ??
-        `${quota.plan ?? 'unknown plan'}; 5-hour=${describeWindow(fiveHour)}; weekly=${describeWindow(weekly)}; bonus=${describeGrant(grant)}`,
+        `${quota.plan ?? 'unknown plan'}; 5-hour=${describeWindow(fiveHour)}; monthly=${describeWindow(monthly)}; weekly=${describeWindow(weekly)}; bonus=${describeGrant(grant)}`,
       data: {
         plan: quota.plan ?? null,
         exhausted: quota.exhausted,
         fiveHourPercent: fiveHour?.usedPercent ?? null,
+        monthlyPercent: monthly?.usedPercent ?? null,
         weeklyPercent: weekly?.usedPercent ?? null,
         grantPercent: grant?.usedPercent ?? null,
         grantUsedAmount: grant?.usedAmount ?? null,

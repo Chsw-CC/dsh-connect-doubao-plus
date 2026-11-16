@@ -156,6 +156,7 @@ export interface DoubaoQuotaView {
   windows: {
     fiveHour: QuotaWindowView | null
     weekly: QuotaWindowView | null
+    monthly: QuotaWindowView | null
     /** Promotional grants ("活动赠送额度"); usually zero or one. */
     incentive: QuotaWindowView[]
   }
@@ -189,6 +190,7 @@ export async function doubaoQuotaView(options: { force?: boolean } = {}): Promis
   const quota = await fetchQuota(options.force === true ? { force: true } : {})
   const fiveHour = findWindow(quota, 'five_hour')
   const weekly = findWindow(quota, 'weekly')
+  const monthly = findWindow(quota, 'monthly')
   return {
     ok: quota.error === undefined,
     profile: describeProfileLocation(),
@@ -197,6 +199,7 @@ export async function doubaoQuotaView(options: { force?: boolean } = {}): Promis
     windows: {
       fiveHour: viewOf(fiveHour),
       weekly: viewOf(weekly),
+      monthly: viewOf(monthly),
       incentive: quota.windows
         .filter((window) => window.type === 'incentive')
         .map((window) => viewOf(window))

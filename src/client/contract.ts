@@ -46,6 +46,7 @@ export interface DoubaoQuotaView {
   windows: {
     fiveHour: DoubaoQuotaWindowView | null
     weekly: DoubaoQuotaWindowView | null
+    monthly: DoubaoQuotaWindowView | null
     /** Promotional grants ("活动赠送额度"); usually zero or one. */
     incentive: DoubaoQuotaWindowView[]
   }

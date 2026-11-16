@@ -1094,6 +1094,7 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
         const quota = await fetchQuota()
         const fiveHour = findWindow(quota, 'five_hour')
         const weekly = findWindow(quota, 'weekly')
+        const monthly = findWindow(quota, 'monthly')
         writeJson(res, 200, {
           ok: true,
           plan: quota.plan ?? null,
@@ -1105,6 +1106,14 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
                   remainingPercent: fiveHour.remainingPercent,
                   resetsAt: fiveHour.resetsAt,
                   resetsInMs: millisUntilReset(fiveHour),
+                }
+              : null,
+            monthly: monthly
+              ? {
+                  usedPercent: monthly.usedPercent,
+                  remainingPercent: monthly.remainingPercent,
+                  resetsAt: monthly.resetsAt,
+                  resetsInMs: millisUntilReset(monthly),
                 }
               : null,
             weekly: weekly
