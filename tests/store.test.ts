@@ -99,7 +99,7 @@ describe('writeStoredSetting', () => {
 describe('withStoredSettings', () => {
   it('falls back to the Loader config when no file exists', () => {
     const merged = withStoredSettings({ enabledModelIds: ['0'], toolEmulation: true }, file)
-    expect(merged).toEqual({ enabledModelIds: ['0'], toolEmulation: true, profileDir: '' })
+    expect(merged).toEqual({ enabledModelIds: ['0'], toolEmulation: true, profileDir: '', autoCheckin: false })
   })
 
   it('lets the file win over the Loader config', () => {
@@ -144,6 +144,7 @@ describe('withStoredSettings', () => {
       enabledModelIds: [],
       toolEmulation: false,
       profileDir: '',
+      autoCheckin: false,
     })
   })
 

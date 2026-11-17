@@ -25,6 +25,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import {
   DOUBAO_CATALOG_PATH,
+  DOUBAO_CHECKIN_PATH,
   DOUBAO_ENABLED_MODELS_FIELD,
   DOUBAO_QUOTA_PATH,
   DOUBAO_SAVE_PATH,
@@ -34,6 +35,8 @@ import {
   clampPercent,
   enabledModelIdsOf,
   DOUBAO_TOOL_EMULATION_FIELD,
+  DOUBAO_AUTO_CHECKIN_FIELD,
+  autoCheckinOf,
   toolEmulationOf,
   formatCountdown,
   formatCompactTokens,
@@ -45,6 +48,7 @@ import type {
   DoubaoModelEntry,
   DoubaoQuotaView,
   DoubaoStatsView,
+  DoubaoCheckinView,
 } from './contract.ts'
 import type { DoubaoCardKey, Translate } from './locales.ts'
 import { DOUBAO_CARD_CSS } from './styles.ts'
@@ -617,6 +621,76 @@ export function DoubaoQuotaCard(props: DoubaoCardProps): ReactElement {
     }
   }, [persistField, draft, t])
 
+  // ---- daily check-in ---------------------------------------------------
+  /**
+   * The check-in panel, read from its own route.
+   *
+   * Separate from the quota read on purpose: the grant and the remaining quota
+   * are different questions with different cache lifetimes, and a check-in
+   * failure must never make the quota bars look broken.
+   */
+  const [checkin, setCheckin] = useState<DoubaoCheckinView | undefined>(undefined)
+  const [checkinBusy, setCheckinBusy] = useState(false)
+
+  const loadCheckin = useCallback(async (): Promise<DoubaoCheckinView | undefined> => {
+    try {
+      const response = await fetch(DOUBAO_CHECKIN_PATH, {
+        method: 'GET',
+        headers: { accept: 'application/json' },
+      })
+      if (!response.ok) throw new Error('HTTP ' + String(response.status))
+      const view = (await response.json()) as DoubaoCheckinView
+      setCheckin(view)
+      return view
+    } catch {
+      // Silent by design: check-in is a bonus, and a bonus that cannot be read
+      // must not put an error message where the quota bars live.
+      return undefined
+    }
+  }, [])
+
+  useEffect(() => { void loadCheckin() }, [loadCheckin])
+
+  const onClaimCheckin = useCallback(async (): Promise<void> => {
+    setCheckinBusy(true)
+    try {
+      const response = await fetch(DOUBAO_CHECKIN_PATH, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...WRITE_HEADERS },
+      })
+      if (!response.ok) throw new Error('HTTP ' + String(response.status))
+      const view = (await response.json()) as DoubaoCheckinView
+      setCheckin(view)
+      // A landed grant moves the quota numbers, so refresh those too.
+      if (view.outcome === 'claimed') void onRefresh()
+    } catch (error: unknown) {
+      const previous = checkin
+      setCheckin({
+        ok: false,
+        outcome: 'failed',
+        continuousDays: previous?.continuousDays ?? null,
+        checkedInToday: previous?.checkedInToday ?? null,
+        rewardAmount: null,
+        rewardType: null,
+        totalAmount: null,
+        day: previous?.day ?? '',
+        fetchedAt: Date.now(),
+        error: (error as Error)?.message ?? 'unknown error',
+      })
+    } finally {
+      setCheckinBusy(false)
+    }
+  }, [checkin, onRefresh])
+
+  const checkinAuto = autoCheckinOf(configured)
+  const onToggleCheckinAuto = useCallback(async (next: boolean): Promise<void> => {
+    try {
+      await persistField(DOUBAO_AUTO_CHECKIN_FIELD, next)
+    } catch {
+      // The switch is advisory; a failed write leaves it as the file has it.
+    }
+  }, [persistField])
+
   /**
    * The tool-emulation switch.
    *
@@ -985,6 +1059,55 @@ export function DoubaoQuotaCard(props: DoubaoCardProps): ReactElement {
           {dirty && <span className="dbq-dirty-flag">{t('models.dirty')}</span>}
           {!dirty && saved && <span className="dbq-saved">{t('models.saved')}</span>}
           {saveError !== null && <span className="dbq-error">{saveError}</span>}
+        </div>
+      </div>
+
+      {/* ---- daily check-in -------------------------------------------- */}
+      <div className="dbq-section">
+        <div className="dbq-section-title">
+          <span>{t('checkin.title')}</span>
+          <span className="dbq-count">
+            {checkin === undefined
+              ? '—'
+              : t('checkin.streak', { days: checkin.continuousDays ?? 0 })}
+          </span>
+        </div>
+        <div className="dbq-row">
+          <div className="dbq-row-head">
+            <span className="dbq-label">
+              {checkin?.outcome === 'claimed'
+                ? t('checkin.claimed', { amount: checkin.rewardAmount ?? 0 })
+                : checkin?.outcome === 'already'
+                  ? t('checkin.already')
+                  : checkin?.outcome === 'needs_login'
+                    ? t('checkin.needsLogin')
+                    : checkin?.outcome === 'no_task'
+                      ? t('checkin.noTask')
+                      : '今日还未领取'}
+            </span>
+            <button
+              type="button"
+              className="dbq-btn"
+              onClick={() => void onClaimCheckin()}
+              disabled={!canWrite || checkinBusy || checkin?.checkedInToday === true}
+            >
+              {checkinBusy ? t('checkin.claiming') : t('checkin.claim')}
+            </button>
+          </div>
+          <label className="dbq-model">
+            <input
+              type="checkbox"
+              checked={checkinAuto}
+              disabled={!canWrite}
+              onChange={event => void onToggleCheckinAuto(event.currentTarget.checked)}
+            />
+            <span className="dbq-model-main">
+              <span className="dbq-model-name"><span>{t('checkin.auto')}</span></span>
+            </span>
+          </label>
+          {checkin?.error !== null && checkin?.error !== undefined && (
+            <span className="dbq-note dbq-warn">{checkin.error}</span>
+          )}
         </div>
       </div>
 

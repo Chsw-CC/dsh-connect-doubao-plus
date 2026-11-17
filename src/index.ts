@@ -24,6 +24,7 @@ import {
   registerDoubaoSaveRoute,
   registerDoubaoAuthRoute,
   registerDoubaoStatsRoute,
+  registerDoubaoCheckinRoute,
 } from './doubao-status.ts'
 import { DoubaoStatsTracker } from './doubao-stats.ts'
 import { setProfileOverride } from './doubao-profile.ts'
@@ -37,9 +38,11 @@ import {
   discoverDoubaoModels,
   enabledModelsOf,
 } from './doubao-catalog.ts'
-import { ENABLED_MODEL_IDS_FIELD, effectiveIds, profileDirOf, toolEmulationOf } from './doubao-config.ts'
+import { ENABLED_MODEL_IDS_FIELD, autoCheckinOf, effectiveIds, profileDirOf, toolEmulationOf } from './doubao-config.ts'
 import { writeStoredSetting, readStoredSettings, withStoredSettings } from './doubao-store.ts'
 import { liveModels, invalidateDiscovery, discoverAllCachedModels, refreshDiscovery } from './doubao-discovery.ts'
+import { startDoubaoAutoCheckin, invalidateCheckinCache } from './doubao-checkin.ts'
+import { invalidateQuotaCache } from './doubao-quota.ts'
 import type { DoubaoSettings } from './doubao-config.ts'
 
 export const PLUGIN_ID = 'dsh-connect-doubao-plus'
@@ -109,6 +112,7 @@ export {
   registerDoubaoSaveRoute,
   registerDoubaoAuthRoute,
   registerDoubaoStatsRoute,
+  registerDoubaoCheckinRoute,
   DOUBAO_QUOTA_PATH,
   DOUBAO_CATALOG_PATH,
   DOUBAO_SAVE_PATH,
@@ -212,7 +216,7 @@ export function settingsNamespaceOf(ctx: unknown): string {
  * releases the shim's port, the adapter, the directory entry, the discovery
  * callback and the HTTP routes — nothing outlives the plugin.
  */
-export function apply(ctx: DoubaoPluginContext, config: DoubaoSettings = { enabledModelIds: [], toolEmulation: false, profileDir: '' }): void {
+export function apply(ctx: DoubaoPluginContext, config: DoubaoSettings = { enabledModelIds: [], toolEmulation: false, profileDir: '', autoCheckin: false }): void {
   let shim: ReturnType<typeof createDoubaoShim> | undefined
   let adapterRelease: DoubaoAdapterRelease | undefined
   let directoryRelease: (() => void) | undefined
@@ -281,8 +285,15 @@ export function apply(ctx: DoubaoPluginContext, config: DoubaoSettings = { enabl
       },
     ])
 
+    // Daily check-in. Started unconditionally, gated by the LIVE setting instead:
+    // `enabled` is re-read on every tick, so turning the switch on or off in the
+    // card takes effect without a host restart, and a disabled plugin idles on one
+    // timer wake-up per ten minutes rather than on a request.
+    const checkinTimer = startDoubaoAutoCheckin({ enabled: () => autoCheckinOf(current) })
+
     ctx.effect(() => () => {
       disposed = true
+      checkinTimer.stop()
       adapterRelease?.()
       directoryRelease?.()
       discoveryRelease?.()
@@ -489,12 +500,21 @@ export function apply(ctx: DoubaoPluginContext, config: DoubaoSettings = { enabl
           read: () => shim?.stats() ?? stats.snapshot(0),
           reset: () => { shim?.resetStats(); if (shim === undefined) stats.reset() },
         })
+        const disposeCheckin = registerDoubaoCheckinRoute(webCtx, {
+          onClaimed: () => {
+            // A fresh +200 moves the quota bars; refresh them the way the card's
+            // own refresh button does, so a claim made by the SCHEDULER is
+            // visible without the user pressing anything.
+            invalidateQuotaCache()
+          },
+        })
         ctx.effect(() => () => {
           disposeQuota()
           disposeCatalog()
           disposeSave()
           disposeAuth()
           disposeStats()
+          disposeCheckin()
         })
       } catch (error: unknown) {
         ctx.logger.error('dsh-connect-doubao-plus: web route registration failed', error)

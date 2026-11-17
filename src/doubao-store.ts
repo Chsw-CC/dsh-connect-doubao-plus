@@ -34,6 +34,7 @@ import { mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
+  AUTO_CHECKIN_FIELD,
   ENABLED_MODEL_IDS_FIELD,
   PROFILE_DIR_FIELD,
   TOOL_EMULATION_FIELD,
@@ -56,6 +57,8 @@ function normalise(raw: unknown): Partial<DoubaoSettings> {
   if (typeof tools === 'boolean') out.toolEmulation = tools
   const profile = (raw as { profileDir?: unknown } | undefined)?.profileDir
   if (typeof profile === 'string') out.profileDir = profile
+  const auto = (raw as { autoCheckin?: unknown } | undefined)?.autoCheckin
+  if (typeof auto === 'boolean') out.autoCheckin = auto
   return out
 }
 
@@ -91,12 +94,14 @@ export function withStoredSettings(config: unknown, path: string = settingsFileP
     enabledModelIds: enabledIdsOf(config) ?? [],
     toolEmulation: (config as { toolEmulation?: unknown } | undefined)?.toolEmulation === true,
     profileDir: profileDirOf(config) ?? '',
+    autoCheckin: (config as { autoCheckin?: unknown } | undefined)?.autoCheckin === true,
   }
   const stored = readStoredSettings(path)
   return {
     enabledModelIds: stored.enabledModelIds ?? base.enabledModelIds,
     toolEmulation: stored.toolEmulation ?? base.toolEmulation,
     profileDir: stored.profileDir ?? base.profileDir,
+    autoCheckin: stored.autoCheckin ?? base.autoCheckin,
   }
 }
 
@@ -117,6 +122,7 @@ export function writeStoredSetting(
     field !== ENABLED_MODEL_IDS_FIELD
     && field !== TOOL_EMULATION_FIELD
     && field !== PROFILE_DIR_FIELD
+    && field !== AUTO_CHECKIN_FIELD
   ) {
     throw new Error(`field ${field} is not persistable`)
   }
@@ -126,9 +132,10 @@ export function writeStoredSetting(
       throw new Error(`invalid value for ${field}`)
     }
     next.enabledModelIds = value.filter((entry): entry is string => typeof entry === 'string')
-  } else if (field === TOOL_EMULATION_FIELD) {
+  } else if (field === TOOL_EMULATION_FIELD || field === AUTO_CHECKIN_FIELD) {
     if (typeof value !== 'boolean') throw new Error(`invalid value for ${field}`)
-    next.toolEmulation = value
+    if (field === TOOL_EMULATION_FIELD) next.toolEmulation = value
+    else next.autoCheckin = value
   } else {
     if (typeof value !== 'string') throw new Error(`invalid value for ${field}`)
     next.profileDir = value

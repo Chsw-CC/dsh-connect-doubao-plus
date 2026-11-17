@@ -70,6 +70,9 @@ With no session the plugin fails loudly ("还没有浏览器登录态…") rathe
 - **Tool-call emulation on by default** (0.7.1) — Doubao can drive DSH's local tools:
   OpenAI `tools` → ```doubao-tool fences → `tool_calls`, parsing JSON arrays, OpenAI
   nested shapes and ```json fences.
+- **Daily check-in** — Doubao's 「天天领额度」 grants +200 a day: the card shows the streak
+  and today's state with a one-press claim, and an optional scheduler claims it once per
+  Beijing day for you (off by default; transient failures retry on the next tick).
 - **Read-only quota panel** — monthly and activity-grant windows as bars, each with a
   **reset countdown** (the legacy 5-hour / weekly buckets are no longer reported by
   Doubao, so the panel dropped them); manual refresh plus a 5-minute automatic poll.

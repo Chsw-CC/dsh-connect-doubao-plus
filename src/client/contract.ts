@@ -15,6 +15,33 @@
 /** Route the card reads, relative to the Harness web server origin. */
 export const DOUBAO_QUOTA_PATH = '/plugins/dsh-connect-doubao-plus/quota'
 
+/** Daily check-in: GET reads the panel, POST claims today's grant. */
+export const DOUBAO_CHECKIN_PATH = '/plugins/dsh-connect-doubao-plus/checkin'
+
+/** What the check-in call can report. Mirrors the host's own union exactly. */
+export type DoubaoCheckinOutcome = 'claimed' | 'already' | 'needs_login' | 'no_task' | 'failed'
+
+/**
+ * The check-in payload `GET|POST {DOUBAO_CHECKIN_PATH}` returns.
+ *
+ * SECURITY: counts, instants and an enum. No cookie, no token, no account id --
+ * the card renders a streak and a button, which needs nothing else.
+ */
+export interface DoubaoCheckinView {
+  ok: boolean
+  outcome: DoubaoCheckinOutcome
+  /** Consecutive days claimed, as the panel reports them. */
+  continuousDays: number | null
+  checkedInToday: boolean | null
+  rewardAmount: number | null
+  rewardType: string | null
+  totalAmount: number | null
+  /** Beijing day this reading describes, `YYYY-MM-DD`. */
+  day: string
+  fetchedAt: number
+  error: string | null
+}
+
 /** One consumption window as the card consumes it. */
 export interface DoubaoQuotaWindowView {
   /** Percent of this window already consumed, 0-100. */
@@ -182,6 +209,14 @@ export const DOUBAO_SAVE_PATH = '/plugins/dsh-connect-doubao-plus/__save'
 
 /** Settings field holding the ticked entry ids. */
 export const DOUBAO_ENABLED_MODELS_FIELD = 'enabledModelIds'
+
+/** Settings field holding the daily check-in scheduler switch. */
+export const DOUBAO_AUTO_CHECKIN_FIELD = 'autoCheckin'
+
+/** Read the check-in switch out of a settings snapshot; absent means OFF. */
+export function autoCheckinOf(configured: unknown): boolean {
+  return (configured as { autoCheckin?: unknown } | undefined)?.autoCheckin === true
+}
 
 /**
  * Read the ticked ids out of a settings snapshot.

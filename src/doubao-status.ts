@@ -25,6 +25,7 @@ import { doubaoCatalogEntries, type DoubaoModelInfo } from './doubao-catalog.ts'
 import { invalidateDiscovery } from './doubao-discovery.ts'
 import type { DoubaoCatalogEntry } from './doubao-catalog.ts'
 import type { DoubaoStatsView } from './doubao-stats.ts'
+import { claimDoubaoCheckin, readDoubaoCheckin } from './doubao-checkin.ts'
 
 /** Route path, relative to the plugin mount point. */
 export const DOUBAO_QUOTA_PATH = '/plugins/dsh-connect-doubao-plus/quota'
@@ -34,6 +35,9 @@ export const DOUBAO_CATALOG_PATH = '/plugins/dsh-connect-doubao-plus/catalog'
 
 /** Route serving live runtime session & token usage statistics. */
 export const DOUBAO_STATS_PATH = '/plugins/dsh-connect-doubao-plus/stats'
+
+/** Route for the daily check-in panel: GET reads it, POST claims today's grant. */
+export const DOUBAO_CHECKIN_PATH = '/plugins/dsh-connect-doubao-plus/checkin'
 
 /** Hostnames an inbound browser request may come from. */
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
@@ -243,7 +247,7 @@ export interface SettingsLike {
  * with the client-cookie path, and a field with no writer only invites a
  * half-applied change: it would land on disk but reach nothing until a restart.
  */
-const WRITABLE_FIELDS = new Set(['enabledModelIds', 'toolEmulation'])
+const WRITABLE_FIELDS = new Set(['enabledModelIds', 'toolEmulation', 'autoCheckin'])
 
 /** Read and parse a JSON request body, bounded. */
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
@@ -420,6 +424,52 @@ export function registerDoubaoCatalogRoute(
       const models = deps.modelsProvider === undefined ? undefined : deps.modelsProvider()
       const payload: DoubaoCatalogView = { ok: true, models: doubaoCatalogEntries(models), error: null }
       json(res, 200, payload)
+    },
+  })
+}
+
+/**
+ * Register the daily check-in route, the mirror of the auth route.
+ *
+ * GET reads the panel (no write, no side effect). POST claims today's grant, so
+ * it needs the write marker exactly like the other writes do -- a cross-origin
+ * page must not be able to spend someone's daily claim from a stray tab.
+ *
+ * GET is honest about a failed claim: the POST that just failed is worth
+ * re-reading, because the failure may be the very thing that landed the grant
+ * (a timeout after the server accepted it is indistinguishable from one before
+ * it, and only a read settles which happened).
+ */
+export function registerDoubaoCheckinRoute(
+  ctx: { webServer: WebServerLike },
+  deps: { onClaimed?: (state: 'claimed' | 'already') => void } = {},
+): () => void {
+  return ctx.webServer.register({
+    kind: 'exact',
+    path: DOUBAO_CHECKIN_PATH,
+    handler: async (req, res) => {
+      if (req.method !== 'GET' && req.method !== 'POST') {
+        json(res, 405, { error: 'method not allowed' })
+        return
+      }
+      if (!guard(req, res, { write: req.method === 'POST' })) return
+      try {
+        if (req.method === 'GET') {
+          json(res, 200, await readDoubaoCheckin())
+          return
+        }
+        // A claim is a write; a read is not. The route reports which happened so
+        // the card can say 「已领」 instead of 「领取」 on the second press.
+        const claimed = await claimDoubaoCheckin()
+        if (claimed.outcome === 'claimed' || claimed.outcome === 'already') {
+          deps.onClaimed?.(claimed.outcome)
+        }
+        json(res, 200, claimed)
+      } catch (error: unknown) {
+        // Should be unreachable -- the module returns failures as values -- but a
+        // bonus must never be able to 500 the card.
+        json(res, 500, { error: safeMessage(error) })
+      }
     },
   })
 }

@@ -57,6 +57,13 @@ export interface DoubaoSettings {
    * `Default\Network\Cookies`) before it is stored.
    */
   profileDir: string
+  /**
+   * Claim the daily check-in quota (每日签到 +200) on a timer, once per Beijing day.
+   *
+   * OFF by default: it grants nothing if the account has no activity, but it does
+   * make the plugin talk to Doubao unasked, so it is opt-in like tool emulation.
+   */
+  autoCheckin: boolean
 }
 
 /** The settings field holding the tool-emulation switch. */
@@ -64,6 +71,14 @@ export const TOOL_EMULATION_FIELD = 'toolEmulation'
 
 /** The settings field holding a manually chosen profile directory. */
 export const PROFILE_DIR_FIELD = 'profileDir'
+
+/** The settings field holding the daily check-in scheduler switch. */
+export const AUTO_CHECKIN_FIELD = 'autoCheckin'
+
+/** Read the check-in switch out of an arbitrary config snapshot; default OFF. */
+export function autoCheckinOf(config: unknown): boolean {
+  return (config as { autoCheckin?: unknown } | undefined)?.autoCheckin === true
+}
 
 /** Read the chosen profile directory, or `undefined` when it is not set. */
 export function profileDirOf(config: unknown): string | undefined {
@@ -125,6 +140,8 @@ export const Config: z<DoubaoSettings> = z.object({
     .description('Catalog ids enabled in the DSH model picker. Doubao routes upstream by content, so this selects which entries are offered, never which model answers. Empty means "not yet configured" and serves the whole catalog.'),
   toolEmulation: asVolatile(z.boolean().default(true))
     .description('使用提示词模拟工具调用（OpenAI tools → doubao-tool 围栏 → tool_calls），让豆包及客户端接入的第三方模型能驱动 Harness 的本地工具。默认开启。'),
+  autoCheckin: asVolatile(z.boolean().default(false))
+    .description('每天自动领取豆包「每日签到」额度（+200）：按北京时间日界，每天最多一次；失败会在下一轮重试。默认关闭。'),
   profileDir: asVolatile(z.string().default(''))
     .description('豆包客户端 User Data 目录。留空表示自动探测（%LOCALAPPDATA%、%APPDATA%、运行中客户端的 --user-data-dir、全盘扫描）。只有当豆包把数据放在自动探测找不到的位置时才需要填。'),
 })
