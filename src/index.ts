@@ -421,13 +421,23 @@ export function apply(ctx: DoubaoPluginContext, config: DoubaoSettings = { enabl
       ctx.logger.error('dsh-connect-doubao-plus: settings presentation registration failed', error)
     }
 
-    // Re-filter the picker whenever the user saves a different selection.
-    // Cordis hands `apply` a fresh config on every settings write, and this
-    // event is how the host announces a write it accepted elsewhere.
-    const onSettingsChanged = (next?: DoubaoSettings): void => {
-      // Cordis updates the config value the host re-reads; `current` tracks it
-      // so the discovery closure below sees the new selection.
-      if (next !== undefined) current = next
+    // Re-filter the picker whenever a settings write lands.
+    //
+    // The event is only a signal that something changed; the value it carries is
+    // not usable here (see the body). The save route's `onApplied` calls the same
+    // function, so a write through our own HTTP path refreshes identically.
+    const onSettingsChanged = (): void => {
+      // Always re-read OUR file; never trust the event payload.
+      //
+      // The host fires `loader/volatile-update` with the LOADER's copy of this
+      // namespace's config — and on this host line that copy is permanently
+      // empty (fiber stuck at LOADING, describe() omits the namespace; see
+      // ./doubao-store.ts). Adopting that payload reset `current` to
+      // `enabledModelIds: []`, which `effectiveIds` reads as "never configured",
+      // and the model picker then offered the WHOLE catalog while the card's
+      // checkboxes (read from the file) showed a narrowed selection. The file is
+      // the only place a save can land, so it is also the only truth to reload.
+      current = withStoredSettings(config)
       setEnabledModelIds(effectiveIds(current))
       notifyAdapters()
     }
@@ -461,14 +471,10 @@ export function apply(ctx: DoubaoPluginContext, config: DoubaoSettings = { enabl
             // Keep the live switch in sync with a write made through this route:
             // the host's own change event is not guaranteed on every line, and a
             // save that only lands on disk would otherwise take effect at restart.
-            onApplied: (field: string, value: unknown) => {
-              const next: DoubaoSettings = { ...current }
-              if (field === 'enabledModelIds' && Array.isArray(value)) {
-                next.enabledModelIds = value.filter((id): id is string => typeof id === 'string')
-              } else if (field === 'toolEmulation' && typeof value === 'boolean') {
-                next.toolEmulation = value
-              }
-              onSettingsChanged(next)
+            onApplied: () => {
+              // The write already landed in the file; reload through the same
+              // path the host event uses so the two cannot drift apart.
+              onSettingsChanged()
             },
           },
         )

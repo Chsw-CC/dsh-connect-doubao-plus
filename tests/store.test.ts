@@ -10,6 +10,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { effectiveIds } from '../src/doubao-config.ts'
 import {
   readStoredSettings,
   settingsFilePath,
@@ -144,6 +145,23 @@ describe('withStoredSettings', () => {
       toolEmulation: false,
       profileDir: '',
     })
+  })
+
+  it('survives a settings-change reload driven by the Loader copy', () => {
+    // Regression for the picker/settings mismatch: the host fires
+    // `loader/volatile-update` carrying the LOADER's copy of this namespace,
+    // which on this host line is always the empty default. Rebuilding from that
+    // payload yielded `enabledModelIds: []` -> effectiveIds() -> undefined ->
+    // "serve the whole catalog", so the model picker listed models the card had
+    // unticked. The reload must go through the file, exactly as
+    // `src/index.ts onSettingsChanged` now does.
+    writeStoredSetting('enabledModelIds', ['5', 'image-gen'], file)
+    const loaderCopy = { enabledModelIds: [], toolEmulation: false, profileDir: '' }
+    const reloaded = withStoredSettings(loaderCopy, file)
+    expect(reloaded.enabledModelIds).toEqual(['5', 'image-gen'])
+    expect(effectiveIds(reloaded)).toEqual(['5', 'image-gen'])
+    // ...while the payload that used to be trusted would have widened the picker:
+    expect(effectiveIds(loaderCopy)).toBeUndefined()
   })
 })
 

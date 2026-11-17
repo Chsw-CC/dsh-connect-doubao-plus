@@ -19,7 +19,7 @@ const bundle = readFileSync('lib/client.js', 'utf8')
 const PAIR = /"([a-z][\w]*\.[\w.]+)": ("(?:[^"\\\n]|\\.)*")/g
 
 /** Keys whose absence means the scan matched the wrong artifact entirely. */
-const REQUIRED_KEYS = ['card.title', 'auth.relogin', 'quota.weekly', 'models.title']
+const REQUIRED_KEYS = ['card.title', 'auth.relogin', 'quota.monthly', 'models.title']
 
 /** Signatures of a path whose separators were collapsed to nothing. */
 const COLLAPSED_PATHS = ['DefaultNetworkCookies', '%LOCALAPPDATA%Doubao']
