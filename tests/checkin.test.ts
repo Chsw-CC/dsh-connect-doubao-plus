@@ -146,6 +146,16 @@ describe('readDoubaoCheckin', () => {
     expect(view.continuousDays).toBe(9)
   })
 
+  it('finds a daily task nested under a task panel list', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
+      code: 0,
+      data: { task_panel: { list: [{ task_kind: 'xxx', check_in: { checked_in_today: true, continuous_days: 3 } }] } },
+    })))
+    const view = await readDoubaoCheckin({ force: true })
+    expect(view.outcome).toBe('already')
+    expect(view.continuousDays).toBe(3)
+  })
+
   it('falls back to an older campaign group when the current one answers without tasks', async () => {
     let claimBody: Record<string, unknown> | undefined
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {

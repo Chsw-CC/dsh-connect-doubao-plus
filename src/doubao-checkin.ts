@@ -309,7 +309,7 @@ function taskEntries(body: Record<string, unknown>, depth = 0): Record<string, u
   if (depth > 3) return []
   const out: Record<string, unknown>[] = []
   for (const [key, value] of Object.entries(body)) {
-    if (Array.isArray(value) && /task/i.test(key)) {
+    if (Array.isArray(value) && /task|list|panel|item/i.test(key)) {
       for (const item of value) {
         if (item !== null && typeof item === 'object') out.push(item as Record<string, unknown>)
       }
