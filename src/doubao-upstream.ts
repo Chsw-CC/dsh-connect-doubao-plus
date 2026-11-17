@@ -1079,6 +1079,8 @@ async function runToolLocalResponder(
   uniqueKey: string,
   credentials: DoubaoCredentials,
   isStreamDone: () => boolean,
+  /** Epoch the turn's credentials were read in; see `absorbSetCookies`. */
+  epoch: number,
   signal?: AbortSignal,
 ): Promise<void> {
   const msToken = credentials.pairs.get('msToken')
@@ -1089,7 +1091,9 @@ async function runToolLocalResponder(
       accept: 'application/json, text/plain, */*',
     })
     delete headers['last-event-id']
-    const epoch = renewalEpoch
+    // The responder belongs to the turn's credentials, not to whatever session
+    // is current when an ACK happens to leave: if the turn started before a
+    // re-login, its rotations must be rejected even though it is still running.
     const res = await fetch(url, {
       method: 'POST',
       headers,
@@ -1242,7 +1246,7 @@ async function streamOnce(
 
   let streamDone = false
   const responderPromise = isTask
-    ? runToolLocalResponder(uniqueKey, credentials, () => streamDone, options.signal).catch(() => {})
+    ? runToolLocalResponder(uniqueKey, credentials, () => streamDone, epoch, options.signal).catch(() => {})
     : Promise.resolve()
 
   try {
