@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { findWindow, millisUntilReset, normalizeWindow, type DoubaoQuota } from '../src/doubao-quota.ts'
+import { findWindow, millisUntilReset, normalizeWindow, remainingTotal, type DoubaoQuota } from '../src/doubao-quota.ts'
 
 /**
  * The payload shapes this account actually receives, captured from the live
@@ -25,6 +25,18 @@ const MONTHLY = {
   total_amount: '9,000',
   used_amount: '9,000',
   used_percent: 100,
+  window_type: 4,
+}
+
+/** The package-credit allowance Doubao switched to in 2026-11. */
+const PACKAGE_WINDOW = {
+  end_time: 1_795_505_409_041,
+  start_time: 0,
+  item_type: 1,
+  less_than_one_percent: false,
+  total_amount: '9,000',
+  used_amount: '449',
+  used_percent: 4,
   window_type: 4,
 }
 
@@ -114,6 +126,20 @@ describe('normalizeWindow', () => {
     expect(millisUntilReset(window!, 2_000)).toBe(end - 2_000)
   })
 
+  it('maps the package-credit window that replaced the rolling limits', () => {
+    const window = normalizeWindow(PACKAGE_WINDOW)
+    // The fork calls the window_type 4 bucket `monthly`; the payload is the same
+    // package-credit allowance upstream labels `package`.
+    expect(window?.type).toBe('monthly')
+    expect(window?.windowType).toBe(4)
+    expect(window?.usedAmount).toBe(449)
+    expect(window?.totalAmount).toBe(9000)
+    expect(window?.usedPercent).toBe(4)
+    // Only an expiry is sent: the window bills from first use.
+    expect(window?.resetsAt).toBe(PACKAGE_WINDOW.end_time)
+    expect(millisUntilReset(window!, 1_000)).toBe(PACKAGE_WINDOW.end_time - 1_000)
+  })
+
   it('ignores window types it does not model', () => {
     // window_type 1/2 were modeled until 2026-11-16; they must stay unmapped.
     expect(normalizeWindow({ ...MONTHLY, window_type: 9 })).toBeUndefined()
@@ -130,10 +156,31 @@ describe('findWindow', () => {
     expect(normalizeWindow({ ...MONTHLY, window_type: 1 })).toBeUndefined()
   })
 
+  it('finds the package-credit window and the grant side by side', () => {
+    const quota = quotaOf(normalizeWindow(PACKAGE_WINDOW), normalizeWindow(BONUS_GRANT, '活动赠送额度'))
+    expect(findWindow(quota, 'monthly')?.totalAmount).toBe(9000)
+    expect(findWindow(quota, 'incentive')?.usedAmount).toBe(782)
+    // No 5-hour bucket in this account shape.
+    expect(findWindow(quota, 'five_hour')).toBeUndefined()
+  })
+
   it('finds the promotional grant in the same list', () => {
     const quota = quotaOf(normalizeWindow(MONTHLY), normalizeWindow(BONUS_GRANT, '活动赠送额度'))
     const grant = findWindow(quota, 'incentive')
     expect(grant?.usedAmount).toBe(782)
     expect(grant?.label).toBe('活动赠送额度')
+  })
+})
+
+describe('remainingTotal', () => {
+  it('sums what is left across the package window and the grant', () => {
+    const quota = quotaOf(normalizeWindow(PACKAGE_WINDOW), normalizeWindow(BONUS_GRANT, '活动赠送额度'))
+    // 9,000 - 449 package credits plus 1,600 - 782 grant credits.
+    expect(remainingTotal(quota)).toBe(9_369)
+  })
+
+  it('returns null when no window reports amounts', () => {
+    const quota = quotaOf(normalizeWindow({ ...MONTHLY, used_amount: undefined, total_amount: undefined }))
+    expect(remainingTotal(quota)).toBeNull()
   })
 })

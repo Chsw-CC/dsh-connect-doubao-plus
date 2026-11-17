@@ -75,6 +75,8 @@ export interface DoubaoQuotaView {
     /** Promotional grants ("活动赠送额度"); usually zero or one. */
     incentive: DoubaoQuotaWindowView[]
   }
+  /** Remaining credits summed over every window that reports amounts. */
+  available: number | null
   /** Epoch ms when this reading was taken. */
   fetchedAt: number
   /** Host-side failure text, or null. */

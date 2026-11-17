@@ -809,6 +809,20 @@ export function DoubaoQuotaCard(props: DoubaoCardProps): ReactElement {
           <span>{t('quota.plan')}</span>
           <span className="dbq-count">{quota?.plan ?? '—'}</span>
         </div>
+        {/*
+          The headline figure the Doubao panel itself leads with: the package
+          balance plus the activity grant. It is a SUM of disjoint
+          entitlements, not a share of any ceiling, so it is rendered as a
+          figure rather than a progress bar.
+        */}
+        {quota?.available !== null && quota?.available !== undefined && (
+          <div className="dbq-row">
+            <div className="dbq-row-head">
+              <span className="dbq-label">{t('quota.available')}</span>
+              <span className="dbq-figure">{quota.available.toLocaleString('en-US')}</span>
+            </div>
+          </div>
+        )}
         {(quota?.windows.incentive ?? []).map((window, index) => (
           <QuotaBar
             key={`incentive-${index}`}

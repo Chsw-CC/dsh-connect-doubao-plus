@@ -13,7 +13,7 @@
  * @module dsh-connect-doubao-plus/status
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { fetchQuota, findWindow, millisUntilReset, invalidateQuotaCache, type QuotaWindow } from './doubao-quota.ts'
+import { fetchQuota, findWindow, millisUntilReset, invalidateQuotaCache, remainingTotal, type QuotaWindow } from './doubao-quota.ts'
 import {
   describeProfileLocation,
   invalidateCredentialCache,
@@ -163,6 +163,12 @@ export interface DoubaoQuotaView {
     /** Promotional grants ("活动赠送额度"); usually zero or one. */
     incentive: QuotaWindowView[]
   }
+  /**
+   * Remaining credits summed over every window that reports amounts — the
+   * headline figure the Doubao panel itself shows. Null when no window reports
+   * amounts, so a percentage-only plan is never rendered as "0".
+   */
+  available: number | null
   fetchedAt: number
   error: string | null
 }
@@ -204,6 +210,7 @@ export async function doubaoQuotaView(options: { force?: boolean } = {}): Promis
         .map((window) => viewOf(window))
         .filter((window): window is QuotaWindowView => window !== null),
     },
+    available: remainingTotal(quota),
     fetchedAt: quota.fetchedAt,
     error: quota.error ?? null,
   }

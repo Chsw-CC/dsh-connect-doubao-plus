@@ -397,6 +397,26 @@ export function findWindow(quota: DoubaoQuota, type: QuotaWindowType): QuotaWind
 }
 
 /**
+ * How many credits are LEFT across every window that reports amounts.
+ *
+ * The Doubao panel leads with one 「可用额度」 figure: the package balance
+ * plus the activity grant. They are disjoint entitlements, so the total is
+ * their sum. A window that reports only a percentage contributes nothing
+ * rather than a guess — a made-up number next to real credits is worse than
+ * a partial total — and null is returned when no window reports amounts.
+ */
+export function remainingTotal(quota: DoubaoQuota): number | null {
+  let total = 0
+  let saw = false
+  for (const window of quota.windows) {
+    if (window.usedAmount === undefined || window.totalAmount === undefined) continue
+    total += Math.max(0, window.totalAmount - window.usedAmount)
+    saw = true
+  }
+  return saw ? total : null
+}
+
+/**
  * Milliseconds until a window resets, clamped at zero.
  * Drives the countdown the user asked for.
  */

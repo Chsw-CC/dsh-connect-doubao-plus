@@ -62,7 +62,7 @@ import {
   type DoubaoErrorKind,
   type DoubaoImage,
 } from './doubao-upstream.ts'
-import { fetchQuota, findWindow, millisUntilReset, peekQuota, type DoubaoQuota } from './doubao-quota.ts'
+import { fetchQuota, findWindow, millisUntilReset, peekQuota, remainingTotal, type DoubaoQuota } from './doubao-quota.ts'
 import {
   DOUBAO_IMAGE_MODEL_ID,
   DOUBAO_MODELS,
@@ -1582,6 +1582,7 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
           ok: true,
           plan: quota.plan ?? null,
           exhausted: quota.exhausted,
+          available: remainingTotal(quota),
           windows: {
             monthly: monthly
               ? {
