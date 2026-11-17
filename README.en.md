@@ -8,7 +8,7 @@
 > itself talks to Doubao over HTTPS with your session.
 
 [![release](https://img.shields.io/github/v/release/Chsw-CC/dsh-connect-doubao-plus)](https://github.com/Chsw-CC/dsh-connect-doubao-plus/releases)
-[![version](https://img.shields.io/badge/version-0.12.4-blue)](./CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.13.0-blue)](./CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 [![platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](#platform-support)
 [![dshfind](https://img.shields.io/badge/dshmarket-dshfind-blueviolet)](https://dshfind.dev)
@@ -28,7 +28,7 @@
 | --- | --- |
 | Doubao works in the browser, but DSH cannot see it | The plugin registers a provider; a 「豆包（Doubao）」 group appears in the model picker |
 | Models, multipliers and effort ladders move with the client, so plugins lag | The client's own menu cache is read, so additions and price changes show up on the next refresh — no plugin release needed |
-| Membership quota is only visible on the website | A read-only card shows the monthly and activity-grant windows with their own reset countdowns; nothing on the account is modified |
+| Membership quota is only visible on the website | The card leads with an **available credits** total (package balance + activity grant), then breaks out the monthly and grant windows with their own reset countdowns; nothing on the account is modified |
 | Chain-of-thought is swallowed by middle layers | `reasoning_content` is passed through verbatim, with native DSH TTFT, throughput and cache-hit stats |
 | Image generation means another tab and a manual save | Pick 「豆包 生图」 in the picker and the reply carries a downloadable image, streamed to disk |
 
@@ -37,7 +37,7 @@
 - **Automatic model discovery** — reads the menu cache under `Default/Preferences` and routes by `model_item_key`; chat models and 「工作任务」 (task-mode, paid membership quota) models are labelled separately, and picking a task model switches the full request shape.
 - **Reasoning passthrough and effort ladders** — thinking content is streamed verbatim; the ladder comes from the per-model `reasoning_effort_config`, measured values 3 / 4 / 5, higher levels declared only in the menu. Deep thinking is on by default; `DSH_DOUBAO_DEEP_THINK=0` turns it off.
 - **Seedream image generation** — end to end; images stream to disk with a 24 MB per-image and 8-per-turn ceiling; over-limit images keep their remote URL instead of being written locally.
-- **Quota panel and daily check-in** — monthly and grant windows with separate countdowns; one-click 「天天领额度」 (+200/day), plus an optional automatic check-in (off by default, Beijing-time day boundary).
+- **Quota panel and daily check-in** — an available-credits total on top, then monthly and grant windows with separate countdowns; one-click 「天天领额度」 (+200/day), plus an optional automatic check-in (off by default, Beijing-time day boundary).
 - **Tool emulation (on by default)** — OpenAI `tools` → `doubao-tool` fence → `tool_calls`, so Doubao can drive DSH's local tools; disable with `toolEmulation: false`.
 - **Local-only loop** — chat goes through a shim bound to `127.0.0.1` with a per-process shared secret; any non-local request gets 401. Credentials are sealed with DPAPI / AES-256-GCM and cached in-process for 10 minutes.
 - **Command-line checks** — `doctor` verifies credentials, account, shim, quota and models without spending quota; `probe` runs one real chat as a smoke test.
@@ -62,7 +62,7 @@
 
 ```bash
 # install from the tarball (recommended)
-dsh plugin --profile desktop add "<path>/dsh-connect-doubao-plus-0.12.4.tgz"
+dsh plugin --profile desktop add "<path>/dsh-connect-doubao-plus-0.13.0.tgz"
 ```
 
 > This plugin is not on the npm registry and does not support `dsh plugin add <git url>`: `prepack` needs `npm`, while the runtime shipped with Harness only has `node`. Both the tarball and the source directory load the already-built `lib/` — no build step.

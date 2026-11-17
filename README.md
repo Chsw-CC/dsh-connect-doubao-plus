@@ -5,7 +5,7 @@
 > 会话只密封在本机（Windows DPAPI / 其它平台 AES-256-GCM）；Harness 到插件的流量只走 `127.0.0.1`，插件再以你的会话向豆包发起 HTTPS。
 
 [![release](https://img.shields.io/github/v/release/Chsw-CC/dsh-connect-doubao-plus)](https://github.com/Chsw-CC/dsh-connect-doubao-plus/releases)
-[![version](https://img.shields.io/badge/version-0.12.4-blue)](./CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.13.0-blue)](./CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 [![platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](#平台支持)
 [![dshfind](https://img.shields.io/badge/dshmarket-dshfind-blueviolet)](https://dshfind.dev)
@@ -24,7 +24,7 @@
 | --- | --- |
 | 豆包网页版好用，但 DSH 里选不到 | 注册成 provider，模型选择器出现「豆包（Doubao）」分组，勾选即用 |
 | 模型、倍率、档位跟着客户端变，插件永远慢一拍 | 读客户端菜单缓存，豆包上新与调价在下一次刷新就出现，不必等发版 |
-| 会员额度花在哪、还剩多少，只能去网页看 | 卡片显示月度额度与活动赠送额度、各自的重置倒计时；纯只读，不改账号任何设置 |
+| 会员额度花在哪、还剩多少，只能去网页看 | 卡片顶部汇总**可用额度**（套餐积分 + 活动赠送的剩余合计），下面分开展示月度额度与活动赠送额度、各自的重置倒计时；纯只读，不改账号任何设置 |
 | 思考过程被中间层吃掉 | `reasoning_content` 全量透传，DSH 原生统计 TTFT、生成速率、上下文缓存命中 |
 | 生图要另开网页、另存 | 选择器选「豆包 生图」，回复直接返回可下载的真实图片，并流式落盘 |
 
@@ -33,7 +33,7 @@
 - **模型目录自动发现** —— 读 `Default/Preferences` 里的菜单缓存，按 `model_item_key` 路由；对话模型与「工作任务」模型（走会员付费额度）分开标注，选任务模型即自动切换完整请求形态。
 - **思考链与思考档位** —— 思考过程逐字透传；档位阶梯来自菜单 `reasoning_effort_config`，逐模型不同，实测值 3 / 4 / 5，更高档仅见菜单声明。深度思考默认开启，`DSH_DOUBAO_DEEP_THINK=0` 可关。
 - **Seedream 生图** —— 端到端打通；图片流式落盘，单图 24 MB、单轮 8 张上限；超限保留远程 URL，不落盘。
-- **额度看板与签到** —— 月度与赠送双窗口、各自倒计时；「天天领额度」一键领取（+200/天），可选每天自动签到（默认关闭，按北京时间日界）。
+- **额度看板与签到** —— 顶部「可用额度」汇总剩余合计，下面分月度与赠送双窗口、各自倒计时；「天天领额度」一键领取（+200/天），可选每天自动签到（默认关闭，按北京时间日界）。
 - **工具模拟（默认开启）** —— OpenAI `tools` → `doubao-tool` 围栏 → `tool_calls`，让豆包驱动 DSH 本地工具；`toolEmulation: false` 可关。
 - **本地闭环** —— 对话走只监听 `127.0.0.1` 的 shim，带每进程共享密钥，非本机请求一律 401；凭据用 DPAPI / AES-256-GCM 密封，进程内缓存 10 分钟。
 - **命令行体检** —— `doctor` 不消耗额度即可核对凭据、账号、shim、额度、模型五项；`probe` 做一次真实对话冒烟。
@@ -58,7 +58,7 @@
 
 ```bash
 # 从 tarball 安装（推荐）
-dsh plugin --profile desktop add "<路径>/dsh-connect-doubao-plus-0.12.4.tgz"
+dsh plugin --profile desktop add "<路径>/dsh-connect-doubao-plus-0.13.0.tgz"
 ```
 
 > 本插件不走 npm registry，也不支持 `dsh plugin add <git 地址>`：`prepack` 需要 `npm`，而 Harness 自带运行时只有 `node`。tarball 与源码目录都由已构建的 `lib/` 直接加载，不需要构建步骤。
