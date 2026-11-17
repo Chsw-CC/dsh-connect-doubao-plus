@@ -663,6 +663,124 @@ export function createRequestLifecycle(
   return { signal: abort.signal, onActivity, clientGone: () => gone, release, abortUpstream }
 }
 
+/**
+ * SSE response sink: bounded flow control plus a keep-alive comment.
+ *
+ * Both halves come from failures that are invisible until they are expensive.
+ *
+ * 1. `res.write()` returns `false` once the socket's buffer is full, and every
+ *    call site here ignored it. A client reading slower than Doubao produces —
+ *    a paused window, a debugger, a host doing its own work mid-stream —
+ *    therefore made Node buffer the REST of the turn in memory, with no ceiling
+ *    and no symptom until the process grew. The queue below is bounded; past
+ *    the cap the turn is failed with a message the user can act on instead of
+ *    quietly eating the host's heap.
+ *
+ * 2. A stream that sends nothing for minutes is indistinguishable from a dead
+ *    one to every hop in between. A `:`-prefixed line is a legal SSE no-op that
+ *    the OpenAI SDK's decoder drops outright (`line.startsWith(':') -> null`),
+ *    but it is still bytes on the wire: the client's own idle watchdog is
+ *    refreshed, and a proxy that reaps silent connections keeps ours.
+ *
+ * The heartbeat deliberately does NOT feed this plugin's idle watchdog — that
+ * one must still fire when DOUBAO itself goes quiet. It only keeps the CLIENT
+ * from timing out first, which used to produce two different error messages for
+ * one identical stall.
+ */
+export interface DoubaoStreamSink {
+  /** Queue-or-write one chunk, honouring backpressure. */
+  write(text: string): void
+  /** Emit one SSE comment line; skipped while the socket is backed up. */
+  beat(): void
+  dispose(): void
+}
+
+/** A client this far behind is not coming back; fail the turn instead of buffering. */
+const SSE_MAX_QUEUED_BYTES = 4 * 1024 * 1024
+
+/** Silence after which the client gets a comment line to chew on. */
+const SSE_HEARTBEAT_MS = 15_000
+
+export function createStreamSink(
+  res: ServerResponse,
+  options: { heartbeatMs?: number; maxQueuedBytes?: number; onOverflow?: (error: Error) => void } = {},
+): DoubaoStreamSink {
+  const heartbeatMs = options.heartbeatMs ?? SSE_HEARTBEAT_MS
+  const maxQueuedBytes = options.maxQueuedBytes ?? SSE_MAX_QUEUED_BYTES
+
+  let blocked = false
+  let queued: string[] = []
+  let queuedBytes = 0
+  let lastWriteAt = Date.now()
+  let disposed = false
+
+  const usable = (): boolean => !disposed && !res.writableEnded && !res.destroyed
+
+  /** Hand queued chunks over while the socket keeps accepting them. */
+  const pump = (): void => {
+    while (!blocked && queued.length > 0) {
+      if (!usable()) { queued = []; queuedBytes = 0; return }
+      const next = queued.shift() as string
+      queuedBytes -= Buffer.byteLength(next)
+      if (!res.write(next)) { blocked = true; return }
+    }
+  }
+
+  const write = (text: string): void => {
+    if (!usable()) return
+    lastWriteAt = Date.now()
+    if (blocked) {
+      const bytes = Buffer.byteLength(text)
+      if (queuedBytes + bytes > maxQueuedBytes) {
+        queued = []
+        queuedBytes = 0
+        options.onOverflow?.(new Error(
+          `客户端读取过慢，已中止本轮：未发送的缓冲超过 ${Math.round(maxQueuedBytes / 1048576)} MB。`,
+        ))
+        return
+      }
+      queued.push(text)
+      queuedBytes += bytes
+      return
+    }
+    if (!res.write(text)) blocked = true
+  }
+
+  const onDrain = (): void => {
+    blocked = false
+    pump()
+  }
+  res.on('drain', onDrain)
+
+  const timer = setInterval(() => {
+    if (!usable() || blocked) return
+    if (Date.now() - lastWriteAt < heartbeatMs) return
+    // Skip the queue on purpose: a backed-up socket already has bytes to
+    // deliver, and a heartbeat is the first thing that may be dropped.
+    lastWriteAt = Date.now()
+    if (res.write(': keepalive\n\n')) return
+    blocked = true
+  }, Math.max(500, Math.floor(heartbeatMs / 2)))
+  timer.unref?.()
+
+  const dispose = (): void => {
+    if (disposed) return
+    disposed = true
+    clearInterval(timer)
+    res.off('drain', onDrain)
+    queued = []
+    queuedBytes = 0
+  }
+  res.once('finish', dispose)
+  res.once('close', dispose)
+
+  return {
+    write,
+    beat: () => { if (!blocked) write(': keepalive\n\n') },
+    dispose,
+  }
+}
+
 export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
   const resolveCredentials = options.resolveCredentials ?? loadDoubaoCredentials
 
@@ -742,6 +860,20 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
   const server: Server = createServer((req, res) => {
     void handle(req, res)
   })
+
+  /**
+   * Keep the loopback connection alive across turns.
+   *
+   * Node's default `keepAliveTimeout` is 5 seconds, and pi-ai's OpenAI client
+   * keeps its own idle sockets for longer. The mismatch means a conversation
+   * with a natural pause between turns threw away a working connection and paid
+   * a fresh TCP handshake (and, on this loopback shim, a fresh server-side
+   * accept) on the next request. 65s outlives a normal thinking pause, and
+   * `headersTimeout` rides one second above it so a half-sent request cannot
+   * hold the socket longer than the keep-alive window it belongs to.
+   */
+  server.keepAliveTimeout = 65_000
+  server.headersTimeout = 66_000
 
   const ready = new Promise<void>((resolve, reject) => {
     server.once('listening', () => resolve())
@@ -824,6 +956,14 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
       'cache-control': 'no-cache',
       connection: 'keep-alive',
     })
+    // Nagle waits for a full segment before sending, which is exactly wrong for
+    // a stream of 20-byte deltas: every token paid the delayed-ACK round trip.
+    res.socket?.setNoDelay(true)
+    const sink = createStreamSink(res, {
+      // A client that cannot keep up is a client that is gone; abort the turn
+      // so Doubao stops generating for nobody.
+      onOverflow: (error) => lifecycle.abortUpstream(error),
+    })
 
     const chunkId = `doubao-${randomBytes(8).toString('hex')}`
     const created = Math.floor(Date.now() / 1000)
@@ -834,9 +974,7 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
     }
 
     const sendRaw = (payload: unknown): void => {
-      if (!res.writableEnded && !res.destroyed) {
-        res.write(`data: ${JSON.stringify(payload)}\n\n`)
-      }
+      sink.write(`data: ${JSON.stringify(payload)}\n\n`)
     }
     const sendChunk = (payload: { choices: unknown[]; usage?: unknown }): void => {
       sendRaw({
@@ -1019,7 +1157,7 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
         sendChunk({ choices: [], usage: usage.openai })
       }
       if (!res.writableEnded) {
-        res.write('data: [DONE]\n\n')
+        sink.write('data: [DONE]\n\n')
         res.end()
       }
       void result
@@ -1062,7 +1200,7 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
         },
       })
       if (!res.writableEnded && !res.destroyed) {
-        res.write('data: [DONE]\n\n')
+        sink.write('data: [DONE]\n\n')
         res.end()
       }
     }

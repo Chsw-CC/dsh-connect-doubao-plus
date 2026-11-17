@@ -26,6 +26,15 @@ import { buildHeaders, buildQueryUrl, QUOTA_ENDPOINT } from './doubao-upstream.t
 /** Quota results are cached briefly so a chatty session does not hammer the API. */
 export const QUOTA_TTL_MS = 5 * 60 * 1000
 
+/**
+ * Ceiling on one quota read, in ms.
+ *
+ * Short on purpose: the panel is a convenience, and a turn must not wait on it.
+ * Ten seconds is longer than the endpoint has ever taken and short enough that
+ * a black-holed connection costs one slow turn instead of a hung host.
+ */
+export const QUOTA_REQUEST_TIMEOUT_MS = 10_000
+
 export type QuotaWindowType = 'monthly' | 'incentive'
 
 export interface QuotaWindow {
@@ -251,7 +260,23 @@ export async function fetchQuota(options: { force?: boolean } = {}): Promise<Dou
   if (!options.force && cachedFailure !== undefined && now - cachedFailureAt < QUOTA_FAILURE_TTL_MS) {
     return cachedFailure
   }
+  // Single-flight. The cache is only written once a response LANDS, so the
+  // first second of a burst (several sessions starting together, or the card
+  // refreshing while a turn begins) used to be one request per caller to the
+  // same endpoint. Coalescing them is free: the answer is identical for every
+  // caller inside QUOTA_TTL_MS anyway.
+  if (inFlight !== undefined) return inFlight
+  const run = requestQuota(now)
+  inFlight = run
+  try {
+    return await run
+  } finally {
+    if (inFlight === run) inFlight = undefined
+  }
+}
 
+/** One uncached read. Never throws; every exit path returns a memoised failure. */
+async function requestQuota(now: number): Promise<DoubaoQuota> {
   const credentials = loadDoubaoCredentials()
   if (!credentials.ok) {
     return rememberFailure({
@@ -267,6 +292,10 @@ export async function fetchQuota(options: { force?: boolean } = {}): Promise<Dou
       method: 'POST',
       headers: buildHeaders(credentials, { 'content-type': 'application/json' }),
       body: JSON.stringify({ product_line: 'membership' }),
+      // Without this a stalled endpoint holds the turn open until the OS gives
+      // up on the socket — the quota read sits on the critical path of EVERY
+      // chat request, so its worst case is the request's worst case.
+      signal: AbortSignal.timeout(QUOTA_REQUEST_TIMEOUT_MS),
     })
     if (!response.ok) {
       return rememberFailure({ exhausted: false, windows: [], fetchedAt: now, error: `HTTP ${response.status}` })
@@ -305,7 +334,13 @@ export async function fetchQuota(options: { force?: boolean } = {}): Promise<Dou
     cachedFailure = undefined
     return quota
   } catch (error) {
-    return rememberFailure({ exhausted: false, windows: [], fetchedAt: now, error: (error as Error).message })
+    // The timeout surfaces as `TimeoutError` (or `AbortError` on older lines);
+    // its default text names none of this, so say what actually happened.
+    const name = (error as Error)?.name
+    const message = name === 'TimeoutError' || name === 'AbortError'
+      ? `豆包额度接口 ${Math.round(QUOTA_REQUEST_TIMEOUT_MS / 1000)} 秒未响应`
+      : (error as Error).message
+    return rememberFailure({ exhausted: false, windows: [], fetchedAt: now, error: message })
   }
 }
 
@@ -313,6 +348,8 @@ let cached: DoubaoQuota | undefined
 /** The last FAILED reading, reused for {@link QUOTA_FAILURE_TTL_MS}. */
 let cachedFailure: DoubaoQuota | undefined
 let cachedFailureAt = 0
+/** The read currently on the wire, shared by every caller that asks meanwhile. */
+let inFlight: Promise<DoubaoQuota> | undefined
 
 /** Drop the cached reading so the next call hits the server. */
 export function invalidateQuotaCache(): void {

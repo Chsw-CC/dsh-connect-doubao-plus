@@ -60,6 +60,17 @@ import {
 export const DISCOVERY_TTL_MS = 10 * 60 * 1000
 
 /**
+ * Ceiling on one catalog read, in ms.
+ *
+ * The catalog sits on the path of a model-picker open and of every adapter
+ * rebuild, so a black-holed endpoint would freeze the picker rather than
+ * degrade it. The whole function already falls back to cached/static models on
+ * any failure; a timeout just makes that fallback arrive in 15s instead of
+ * whenever the socket gives up.
+ */
+export const DISCOVERY_REQUEST_TIMEOUT_MS = 15_000
+
+/**
  * Names produced by the client for models that only exist inside 「工作任务」.
  *
  * The app prefixes them itself (「工作任务 Pro」, 「工作任务 Auto」), which is a
@@ -565,6 +576,7 @@ export async function refreshDiscovery(options: { force?: boolean; now?: number 
             method: 'POST',
             headers: buildHeaders(credentials, { 'content-type': 'application/json' }),
             body: JSON.stringify({ language_code: 'zh', bot_id: DEFAULT_BOT_ID }),
+            signal: AbortSignal.timeout(DISCOVERY_REQUEST_TIMEOUT_MS),
           },
         )
         if (response.ok) {
