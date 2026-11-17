@@ -1,0 +1,166 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit for dsh-connect-doubao-plus, a DeepSeek Harness plugin.
+#
+# Free tier, so the review budget is the thing to spend carefully. This file
+# points it at what a human would otherwise have to catch by hand: the Doubao
+# web protocol this repo reverse-engineers (no test server exists to check it
+# against), the per-platform credential sealing, and the contract every file
+# under src/client/ has to keep with src/index.ts.
+#
+# Deliberately absent: auto-approval, commit-status gating, pre-merge checks.
+# This repository merges by hand and the gate is a local `npm run check`
+# (tsc + tsdown + vitest + the locale probe). A bot that also blocked merges
+# would be a second source of truth to keep in sync, not a second pair of eyes.
+language: zh-CN
+
+reviews:
+  # `chill` posts what matters inline and keeps the rest in the summary.
+  # `assertive` buries a protocol bug under nitpicks on a 4k-line diff, and
+  # `quiet` is how the 710020202 regression would have got through.
+  profile: chill
+
+  high_level_summary: true
+  # The walkthrough is the only place a structural read of the PR appears:
+  # which module changed shape, not which line moved.
+  changed_files_summary: true
+  sequence_diagrams: true
+  collapse_walkthrough: true
+  review_status: true
+
+  # Decoration with no reader on this repo.
+  poem: false
+  in_progress_fortune: false
+  estimate_code_review_effort: false
+  suggested_labels: false
+  auto_apply_labels: false
+  suggested_reviewers: false
+
+  auto_review:
+    enabled: true
+    # One review per push.
+    auto_incremental_review: true
+    drafts: false
+    # Three iterations covers fix-and-recheck without paying for a fourth pass
+    # over a diff the reviewer has already read.
+    auto_pause_after_reviewed_commits: 3
+    ignore_title_keywords:
+      - "WIP"
+      - "DO NOT MERGE"
+      - "chore(release)"
+    # release/0.x.y is a squashed publish branch that duplicates main;
+    # reviewing it would spend the same budget twice.
+    base_branches:
+      - "^main$"
+
+  path_filters:
+    # Generated or vendored.
+    - "!lib/**"
+    - "!node_modules/**"
+    - "!package-lock.json"
+    - "!pnpm-lock.yaml"
+    - "!docs/assets/**"
+    # Scratch directories this workflow writes at runtime.
+    - "!.pr/**"
+    - "!awesome-dsh-plugin/**"
+    - "!.rename-push/**"
+  path_instructions:
+    - path: "src/doubao-upstream.ts"
+      instructions: |
+        This file speaks Doubao's private web protocol, transcribed from captured
+        requests. There is no official SDK and no test server, so review it as
+        reverse-engineering rather than as ordinary HTTP code:
+
+        - Field names, nesting and value TYPES must match the capture exactly. A
+          numeric `agent_mode` where the client sends a string is ignored by the
+          server without an error. Treat any unexplained shape change as a bug.
+        - `conversation_id`, `continue_conversation` and `need_create_conversation`
+          move together. Setting one without the others produces a request the
+          server accepts and answers in a NEW thread, so the answer looks fine
+          while an unrelated turn has quietly lost its history.
+        - Business errors arrive as HTTP 200 with a non-zero `code` in the body.
+          Any check that only looks at `response.ok` misses them.
+        - Error codes are semantic, not numbers: 710020202 is a rejected
+          conversation id, 710010702 is an unattached local task runtime. Flag
+          code that compares against a literal or treats the two alike.
+
+    - path: "src/doubao-shim.ts"
+      instructions: |
+        The OpenAI-compatible surface. Two properties to hold it to:
+
+        - Backpressure. The client can stop reading at any moment, so the SSE
+          queue has to bound, drain on `drain`, and give up through a callback
+          instead of buffering without limit.
+        - Automatic recovery. A failure the plugin can retry should not reach the
+          user. Before flagging a thrown error as a bug, check whether that path
+          had a valid reason to refuse a retry: text already written to the
+          client, a cancelled request or a duplicated fix-up are reasons; a
+          counter that happens to be non-zero usually is not.
+
+        Watch for data that has already been streamed to the client and is then
+        re-sent by a fallback path. Duplicate deltas are invisible to a test that
+        only asserts the response arrived.
+    - path: "src/doubao-auth.ts"
+      instructions: |
+        Credential storage. A secret goes to the OS keystore (DPAPI on Windows,
+        Keychain on macOS) or to an AES-256-GCM file sealed under a local 0600 key,
+        and nowhere else: not a plaintext JSON write, not a log line, not a thrown
+        error message that embeds the value. Flag any path that widens what is
+        written to disk or read back from it.
+
+        An auth change also has to keep both strategies distinguishable by the
+        consumer. A sealed browser session and a QR login that returns a cookie
+        header are stored by different code paths; if they resolve to the same
+        shape, the request path picks one arbitrarily and reports a misleading
+        failure.
+
+    - path: "src/doubao-catalog.ts"
+      instructions: |
+        Two model lists exist here: the STATIC `DOUBAO_MODELS` compiled into the
+        package, and the DISCOVERED list read from the user's live Doubao menu --
+        the only one that knows the `person-*` third-party slugs. A model missing
+        from the static list is therefore normal, not an error.
+
+        `enabledModelsOf` is the user's checklist filter and is authoritative for
+        BOTH lists: a discovered id the user unticked is absent from the picker
+        exactly like a static one. Accepting an unrecognised id because the static
+        list might hide a new model reintroduces a bug that already shipped once.
+        New models stay visible because the settings card seeds its draft ticked
+        from the catalog it just read, never because the filter skips them.
+    - path: "src/client/**"
+      instructions: |
+        Browser bundle, built separately from the node entry points and loaded
+        through `__ModuleLoader__`. Anything imported here must already exist in
+        the host's client module graph at runtime, not merely in package.json. A
+        compile-time import of a module the host does not provide degrades to an
+        empty card with no error, which is the hardest failure in this plugin to
+        trace back to its cause.
+
+        Copy lives in src/client/locales.ts, zh and en side by side. A user-facing
+        string written anywhere else fails scripts/check-locale-literals.mjs, and
+        a key present in one language but missing in the other fails it too. Add
+        to both lists in the same edit.
+
+    - path: "tests/**"
+      instructions: |
+        These tests encode protocol behaviour observed against the live service.
+        Fixture payloads are trimmed real responses, and the comment above a
+        test usually names the date and the symptom it was captured from. That
+        makes them a record, so a test looking over-specific is not on its own
+        reason to simplify it.
+
+        Flag instead: a fixture whose shape drifted from the capture its comment
+        describes; a test that claims resilience but only asserts the happy path;
+        and a regression test that would still pass with the fix it guards
+        reverted. For that last one, check what the assertion counts --
+        `expect(requests).toHaveLength(3)` separates retried from failed, while
+        `expect(response.ok)` does not.
+    - path: "**/*.{yml,yaml}"
+      instructions: |
+        Three YAML files here are load-bearing, and a YAML error in any of them
+        fails silently rather than loudly. `cordis.patch.yml` is the manifest that
+        makes the package installable via `dsh plugin add`. The market entry under
+        `awesome-dsh-plugin-submission/` is parsed by someone else's CI. And this
+        file itself is parsed by CodeRabbit, which ignores an invalid configuration
+        without reporting it. Check indentation and quoting rather than only the
+        values.
