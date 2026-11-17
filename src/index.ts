@@ -17,7 +17,7 @@
  * @module dsh-connect-doubao-plus
  */
 import { createDoubaoAdapter } from './doubao-adapter.ts'
-import { createDoubaoShim } from './doubao-shim.ts'
+import { createDoubaoShim, pruneImageCache } from './doubao-shim.ts'
 import {
   registerDoubaoQuotaRoute,
   registerDoubaoCatalogRoute,
@@ -40,9 +40,9 @@ import {
 } from './doubao-catalog.ts'
 import { ENABLED_MODEL_IDS_FIELD, autoCheckinOf, effectiveIds, profileDirOf, toolEmulationOf } from './doubao-config.ts'
 import { writeStoredSetting, readStoredSettings, withStoredSettings } from './doubao-store.ts'
-import { liveModels, invalidateDiscovery, discoverAllCachedModels, refreshDiscovery } from './doubao-discovery.ts'
+import { liveModels, invalidateDiscovery, discoverAllCachedModels, refreshDiscovery, peekModels } from './doubao-discovery.ts'
 import { startDoubaoAutoCheckin, invalidateCheckinCache } from './doubao-checkin.ts'
-import { invalidateQuotaCache } from './doubao-quota.ts'
+import { fetchQuota, invalidateQuotaCache } from './doubao-quota.ts'
 import type { DoubaoSettings } from './doubao-config.ts'
 
 export const PLUGIN_ID = 'dsh-connect-doubao-plus'
@@ -95,6 +95,7 @@ export * from './doubao-catalog.ts'
 export * from './doubao-config.ts'
 export {
   liveModels,
+  peekModels,
   invalidateDiscovery,
   refreshDiscovery,
   discoverModels,
@@ -304,6 +305,15 @@ export function apply(ctx: DoubaoPluginContext, config: DoubaoSettings = { enabl
     // The shim's port is ephemeral and resolved per model read, so the first
     // snapshot after startup already points at the live port.
     invalidate()
+
+    // Warm the quota cache before the first turn. The shim bounds a cold read
+    // (see `quotaGate`), but a warm cache removes the wait entirely — and this
+    // is the one moment where a 10-second round trip costs nobody anything.
+    void Promise.resolve(fetchQuota()).catch(() => {})
+
+    // Trim the generated-picture cache off the request path: it is pure disk
+    // housekeeping, and a failure here must never delay (or fail) activation.
+    void pruneImageCache().catch(() => {})
 
     // Populate the live HTTP model catalog asynchronously so pure browser-login
     // installs (with no desktop Preferences file) still see the full model list.

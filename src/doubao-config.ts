@@ -37,14 +37,20 @@ export interface DoubaoSettings {
   /**
    * Simulate tool calling in the prompt so Doubao can drive the Harness tools.
    *
-   * OFF by default. Doubao's endpoint ignores a `tools` array outright (measured
+   * ON by default — the schema default below is `true`, and
+   * `toolEmulationOf()` treats only an explicit `false` as "off". (This comment
+   * used to say "OFF by default", which contradicted both.)
+   *
+   * Doubao's endpoint ignores a `tools` array outright (measured
    * 2026-10-22: it answered with its OWN server-side search skill and never
    * referenced our declarations), so the only channel available is the prompt:
    * describe the tools, then parse a fenced block back into `tool_calls`.
    *
    * Measured 2026-11-02 with a two-tool sandbox loop: 9/9 calls well-formed,
-   * 5/5 rounds converged, ~11.5s per round, one duplicate call. That is enough
-   * to be useful and not enough to be trusted silently — hence opt-in.
+   * 5/5 rounds converged, ~11.5s per round, one duplicate call. It is a
+   * SIMULATION and can degrade when the upstream model changes its output
+   * habits, which is why the card exposes the switch and the prompt contract
+   * spells out the failure modes.
    */
   toolEmulation: boolean
   /**

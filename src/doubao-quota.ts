@@ -275,6 +275,22 @@ export async function fetchQuota(options: { force?: boolean } = {}): Promise<Dou
   }
 }
 
+/**
+ * The memoised reading, if one is still valid — no request, no promise, no timer.
+ *
+ * `fetchQuota()` is cheap on a cache hit but not free: it allocates a promise
+ * and, via the shim's `quotaGate`, a watchdog timer per call. The request path
+ * asks on EVERY chat turn, and the answer is almost always "here is the reading
+ * you cached a minute ago". This exposes that answer directly so the hot path
+ * can skip the machinery entirely; `undefined` means "would have to go to the
+ * network", which is the only case where the gate's budget is relevant.
+ */
+export function peekQuota(now = Date.now()): DoubaoQuota | undefined {
+  if (cached !== undefined && now - cached.fetchedAt < QUOTA_TTL_MS) return cached
+  if (cachedFailure !== undefined && now - cachedFailureAt < QUOTA_FAILURE_TTL_MS) return cachedFailure
+  return undefined
+}
+
 /** One uncached read. Never throws; every exit path returns a memoised failure. */
 async function requestQuota(now: number): Promise<DoubaoQuota> {
   const credentials = loadDoubaoCredentials()

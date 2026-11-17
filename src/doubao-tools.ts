@@ -9,9 +9,10 @@
  *
  * So the tools are carried in the only channel that IS read — the prompt text —
  * and the model's answer is parsed back into standard `tool_calls`. This is a
- * simulation, and it is labelled as one everywhere it can be: it is opt-in
- * (`toolEmulation`, default off) because it is not native and can degrade when
- * the upstream model changes its output habits.
+ * simulation, and it is labelled as one everywhere it can be: it is a user
+ * switch (`toolEmulation`) that defaults to ON (schema default `true`; see
+ * `doubao-config.ts`), because without it the plugin cannot drive the local
+ * tools at all — while every comment stays honest about it being simulated.
  *
  * WHAT WAS MEASURED (2026-11-02, scripts/tool-emul-probe.mjs):
  *   9 tool calls across 5 task rounds · 0 malformed JSON · 1 duplicate call

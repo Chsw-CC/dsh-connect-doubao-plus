@@ -16,6 +16,28 @@ import {
   startDoubaoAutoCheckin,
 } from '../src/doubao-checkin.ts'
 
+/**
+ * A signed-in session, unconditionally.
+ *
+ * `readDoubaoCheckin` resolves the account through `loadDoubaoCredentials`, which
+ * unseals a real file from `~/.dsh`. Without this stub every mapping test below
+ * short-circuits into `needs_login` on a machine that has never scanned the QR
+ * code — i.e. on CI and on every contributor who is not the maintainer. The
+ * assertions are about protocol handling (idempotency, the 710012001 code, the
+ * day boundary), none of which involves a live account.
+ */
+vi.mock('../src/doubao-auth.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/doubao-auth.ts')>()
+  return {
+    ...actual,
+    loadDoubaoCredentials: () => ({
+      ok: true,
+      header: 'sessionid=test; ttwid=test; msToken=test',
+      pairs: new Map([['sessionid', 'test'], ['ttwid', 'test'], ['msToken', 'test']]),
+    }),
+  }
+})
+
 /** A panel body in the shape the live endpoint returns. */
 function panelBody(options: { checked?: boolean; days?: number } = {}) {
   return {

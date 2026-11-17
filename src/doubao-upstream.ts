@@ -296,18 +296,16 @@ export interface ChatRequestOptions {
   /**
    * Send the request as a 「工作任务 · 本地电脑」 instead of a plain chat.
    *
-   * DEFAULTS TO TRUE. The whole point of this route is that the executing
-   * machine is this one, which is where the Harness already runs its tools; the
-   * cloud VM runtime (`runtime_type: 1`) puts execution somewhere we cannot
-   * reach.
+   * DEFAULT IS OFF, and it turns on two ways: selecting a 「工作任务」 model
+   * (`isTaskModel(modelKey)`) does it implicitly, or setting
+   * `DSH_DOUBAO_TASK=1` in the host environment does it explicitly. (This
+   * comment used to claim "defaults to true", which was wrong in both
+   * directions — `taskModeEnabled` returns `false` when nothing asks for it.)
    *
    * What travels: `ext.general_task_param` as a JSON *string* — the client's own
    * shape, transcribed from a captured request. Its presence is what makes the
    * server treat the turn as a task (the client's `is_general_task` check is
    * `!!ext.general_task_param`); `agent_mode` stays 1.
-   *
-   * Set `DSH_DOUBAO_TASK=0` in the host environment to fall back to plain chat
-   * without a rebuild — the escape hatch for a server-side rejection.
    */
   taskMode?: boolean
   /**
@@ -678,55 +676,63 @@ interface StreamFrame {
  * also permits comment lines (`:`), so those are skipped. Returns the frames
  * plus whatever tail did not yet form a complete frame.
  */
+/**
+ * Split a chunk of the Doubao SSE body into complete frames.
+ *
+ * PERFORMANCE. This walks the buffer exactly ONCE, line by line, and closes a
+ * frame on the blank line that terminates it. Two earlier shapes were quadratic
+ * in the burst size: `search()` + `slice(remainder)` per frame re-scanned and
+ * re-allocated the rest of the buffer, and a per-frame `indexOf` for each of
+ * the two possible terminators (`\n\n` and `\r\n\r\n`) re-scanned to the end
+ * whenever the other style was absent. Frames are delimited by line structure,
+ * not by a substring search, so both CRLF and LF bodies are handled without
+ * probing for either.
+ *
+ * Only the lines of one frame are ever held as substrings; the tail is sliced
+ * once at the end. A frame that is still incomplete stays in `rest`.
+ */
 export function parseFrames(buffer: string): { frames: StreamFrame[]; rest: string } {
   const frames: StreamFrame[] = []
-  let rest = buffer
-  // Consume complete blank-line-terminated blocks.
-  while (true) {
-    const boundary = rest.search(/\r?\n\r?\n/)
-    if (boundary < 0) break
-    const block = rest.slice(0, boundary)
-    rest = rest.slice(boundary).replace(/^\r?\n\r?\n/, '')
-    const frame: StreamFrame = { data: '' }
-    const dataLines: string[] = []
-    for (const line of block.split(/\r?\n/)) {
-      if (!line || line.startsWith(':')) continue
-      const colon = line.indexOf(':')
-      const field = colon < 0 ? line : line.slice(0, colon)
-      let value = colon < 0 ? '' : line.slice(colon + 1)
-      if (value.startsWith(' ')) value = value.slice(1)
-      if (field === 'id') frame.id = value
-      else if (field === 'event') frame.event = value
-      else if (field === 'data') dataLines.push(value)
-    }
-    if (dataLines.length > 0 || frame.event) {
-      frame.data = dataLines.join('\n')
-      frames.push(frame)
-    }
-  }
-  return { frames, rest }
-}
+  let frame: StreamFrame | undefined
+  const dataLines: string[] = []
+  let lineStart = 0
+  /** End offset of the last COMPLETE frame; the tail starts there. */
+  let consumed = 0
 
-/**
- * Collect assistant text and routing metadata from a decoded frame payload.
- *
- * Doubao nests message content in several differently-shaped envelopes
- * depending on the event, so this walks any `text` field it finds rather than
- * assuming one fixed path.
- */
-function harvestText(node: unknown, into: { out: string[] }): void {
-  if (Array.isArray(node)) {
-    for (const item of node) harvestText(item, into)
-    return
-  }
-  if (node === null || typeof node !== 'object') return
-  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
-    if ((key === 'text' || key === 'content' || key === 'delta') && typeof value === 'string') {
-      into.out.push(value)
-    } else {
-      harvestText(value, into)
+  while (true) {
+    const newline = buffer.indexOf('\n', lineStart)
+    if (newline < 0) break
+    let line = buffer.slice(lineStart, newline)
+    lineStart = newline + 1
+    // A CRLF body leaves the carriage return on every line but the last.
+    if (line.endsWith('\r')) line = line.slice(0, -1)
+
+    if (line === '') {
+      if (frame !== undefined && (dataLines.length > 0 || frame.event)) {
+        frame.data = dataLines.length === 1 ? (dataLines[0] as string) : dataLines.join('\n')
+        frames.push(frame)
+      }
+      frame = undefined
+      dataLines.length = 0
+      consumed = lineStart
+      continue
+    }
+    if (line.startsWith(':')) continue
+
+    const colon = line.indexOf(':')
+    const field = colon < 0 ? line : line.slice(0, colon)
+    let value = colon < 0 ? '' : line.slice(colon + 1)
+    if (value.startsWith(' ')) value = value.slice(1)
+
+    if (field === 'id' || field === 'event' || field === 'data') {
+      frame ??= { data: '' }
+      if (field === 'event') frame.event = value
+      else if (field === 'id') frame.id = value
+      else dataLines.push(value)
     }
   }
+
+  return { frames, rest: consumed === 0 ? buffer : buffer.slice(consumed) }
 }
 
 /**
@@ -1238,9 +1244,7 @@ async function streamOnce(
     : Promise.resolve()
 
   try {
-    const result = await consumeStream(response, options.callbacks, {
-      harvestNotifyText: isTask,
-    })
+    const result = await consumeStream(response, options.callbacks)
     return result
   } finally {
     streamDone = true
@@ -1404,7 +1408,6 @@ export async function stopGeneration(
 async function consumeStream(
   response: Response,
   callbacks?: StreamCallbacks,
-  options: { harvestNotifyText?: boolean } = {},
 ): Promise<DoubaoChatResult> {
   const reader = response.body?.getReader()
   if (!reader) throw new DoubaoUpstreamError('Doubao returned an empty response body.')
@@ -1702,7 +1705,7 @@ function collectTelemetry(payload: unknown, target: DoubaoUpstreamTelemetry): vo
   const chunkText = texts.join('')
   const notifyText = notifyTexts.join('')
   const raw = assembleReplyText(notifyText, chunkText)
-  const text = stripPromptEcho(raw)
+  const text = trimLeadingWhitespace(raw)
   if (taskAgentError !== undefined) {
     // Checked BEFORE the empty-completion branch: the placeholder text is
     // non-empty, so ordering it after would report a generic failure and lose
@@ -1775,14 +1778,18 @@ export function assembleReplyText(notifyText: string, chunkText: string): string
 }
 
 /**
- * Remove the echoed user prompt from the front of the assembled text.
+ * Trim leading whitespace from an assembled reply.
  *
- * Doubao's first chunk replays the inbound message; keeping it would make every
- * reply appear to start with the user's own words.
+ * NOTE ON THE NAME: this used to be called `stripPromptEcho` and claimed to
+ * remove the echoed user prompt. It does not, and it never did — the echo is
+ * handled where it actually occurs (`assembleReplyText`, which detects a
+ * cumulative chunk stream instead of concatenating the opening twice). All this
+ * function does is drop the padding Doubao sometimes puts before the first
+ * token; keeping the old name meant the real echo fix looked redundant and a
+ * future reader could "simplify" it away.
  */
-function stripPromptEcho(raw: string): string {
-  const trimmed = raw.trimStart()
-  return trimmed
+function trimLeadingWhitespace(raw: string): string {
+  return raw.trimStart()
 }
 
 /* ------------------------------------------------------------------ *
@@ -1795,7 +1802,12 @@ function stripPromptEcho(raw: string): string {
  */
 export async function chat(
   prompt: string,
-  options: ChatRequestOptions & { signal?: AbortSignal; callbacks?: StreamCallbacks } = {},
+  options: ChatRequestOptions & {
+    signal?: AbortSignal
+    callbacks?: StreamCallbacks
+    /** The session the caller already resolved, so it is not unsealed twice. */
+    credentials?: DoubaoCredentials
+  } = {},
 ): Promise<DoubaoChatResult> {
   return streamChat(prompt, options)
 }

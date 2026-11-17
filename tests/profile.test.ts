@@ -148,7 +148,10 @@ describe('listDoubaoProfiles ordering', () => {
     expect(profiles.map((entry) => entry.source)).toEqual(['appdata', 'process'])
   })
 
-  it('deduplicates case-insensitively, since the probe and AppData often agree', () => {
+  // Windows-only on purpose: the assertion needs a case-insensitive filesystem
+  // to resolve the upper-cased path at all, so on Linux/macOS the fixture would
+  // simply not exist and the test would fail for a reason unrelated to the code.
+  it.skipIf(process.platform !== 'win32')('deduplicates case-insensitively, since the probe and AppData often agree', () => {
     const live = makeProfile(join(root, 'shared'))
     const profiles = listDoubaoProfiles({
       env: { [PROFILE_ENV]: live.toUpperCase() },
@@ -283,6 +286,8 @@ describe('manual override', () => {
       manual,
       appDataBases: [join(root, 'appdata', 'User Data')],
       processCommandLines: () => [],
+      scanRoots: [],
+      platform: 'win32',
     })
     expect(profiles[0]).toEqual({ dir: manual, source: 'manual' })
     expect(profiles.some(entry => entry.dir === appdata)).toBe(true)
@@ -299,6 +304,8 @@ describe('manual override', () => {
       manual: empty,
       appDataBases: [join(root, 'appdata', 'User Data')],
       processCommandLines: () => [],
+      scanRoots: [],
+      platform: 'win32',
     })
     expect(profiles).toEqual([{ dir: appdata, source: 'appdata' }])
   })
@@ -307,7 +314,16 @@ describe('manual override', () => {
     // The picker hands back whatever the user clicked, and people click the
     // install folder (`D:\Doubao`) rather than the `User Data` inside it.
     const manual = makeProfile(root, 'User Data')
-    const profiles = listDoubaoProfiles({ manual: root, appDataBases: [], processCommandLines: () => [] })
+    // `platform` is pinned because profile discovery is Windows-only by design
+    // (the desktop client is); without it these assertions only pass on Windows
+    // and the suite is red on every other contributor's machine.
+    const profiles = listDoubaoProfiles({
+      manual: root,
+      appDataBases: [],
+      processCommandLines: () => [],
+      scanRoots: [],
+      platform: 'win32',
+    })
     expect(profiles[0]).toEqual({ dir: manual, source: 'manual' })
   })
 
@@ -315,7 +331,12 @@ describe('manual override', () => {
     const manual = makeProfile(root, 'Chosen')
     setProfileOverride(manual)
     try {
-      expect(listDoubaoProfiles({ appDataBases: [], processCommandLines: () => [] })[0]?.source).toBe('manual')
+      expect(listDoubaoProfiles({
+        appDataBases: [],
+        processCommandLines: () => [],
+        scanRoots: [],
+        platform: 'win32',
+      })[0]?.source).toBe('manual')
       setProfileOverride(undefined)
       // Nothing left to find: no appdata candidate, no client process, and the
       // drive scan is kept out of the way with a zero budget.
@@ -323,6 +344,7 @@ describe('manual override', () => {
         appDataBases: [],
         processCommandLines: () => [],
         scanRoots: [],
+        platform: 'win32',
       })).toEqual([])
     } finally {
       setProfileOverride(undefined)
@@ -332,7 +354,12 @@ describe('manual override', () => {
   it('ignores a module-level override pointing at nothing', () => {
     setProfileOverride(join(root, 'missing'))
     try {
-      const profiles = listDoubaoProfiles({ appDataBases: [], processCommandLines: () => [] })
+      const profiles = listDoubaoProfiles({
+        appDataBases: [],
+        processCommandLines: () => [],
+        scanRoots: [],
+        platform: 'win32',
+      })
       expect(profiles.some(entry => entry.source === 'manual')).toBe(false)
     } finally {
       setProfileOverride(undefined)

@@ -57,12 +57,16 @@ import { setDoubaoCatalogSnapshot } from './DoubaoCatalogStore.ts'
 /**
  * How often the quota is re-read while the card is on screen.
  *
- * The point of the card is "how much is left", and that number changes as the
- * user works — a five-minute-old "782" is indistinguishable from a frozen
- * panel. Thirty seconds costs one small summary call and only runs while the
- * tab is visible.
+ * The point of the card is "how much is left", so a five-minute-old "782" is
+ * indistinguishable from a frozen panel — but the original thirty seconds was
+ * measured against the wrong budget: each tick issues a FORCED summary read
+ * plus a stats read, i.e. two requests every thirty seconds (~120/hour) from
+ * every open settings pane, for a number that moves by a few hundred units
+ * across a whole day. Ninety seconds keeps the panel visibly live at a third of
+ * the traffic, and every remove of the tab, tab switch, manual refresh and quota
+ * change still updates immediately.
  */
-const POLL_INTERVAL_MS = 30 * 1000
+const POLL_INTERVAL_MS = 90 * 1000
 
 /** How often the local clock ticks, so countdowns move without any request. */
 const TICK_MS = 1000
