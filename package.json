@@ -2,7 +2,7 @@
   "name": "dsh-connect-doubao-plus",
   "displayName": "DSH Connect Doubao Plus",
   "description": "把豆包（Doubao）账号接入 DeepSeek Harness：实时发现线上菜单模型、对话框直接展示计费倍率与对比、完整思考链（CoT）推理透传、「工作任务」模型（走会员付费额度）、Seedream 生图，以及原生 Token 用量/会话统计与实时额度看板。只需浏览器扫码登录一次；Windows / macOS / Linux 均支持，会话用 DPAPI（Windows）或 AES-256-GCM（其它平台）密封在本机。",
-  "version": "0.12.5",
+  "version": "0.13.1",
   "license": "MIT",
   "keywords": [
     "dsh-plugin",
@@ -21,7 +21,8 @@
   "bin": {
     "dsh-connect-doubao-plus": "lib/bin.js",
     "dsh-connect-doubao-plus-probe": "lib/cli-probe.js",
-    "dsh-connect-doubao-plus-doctor": "lib/cli-doctor.js"
+    "dsh-connect-doubao-plus-doctor": "lib/cli-doctor.js",
+    "dsh-connect-doubao-plus-checkin": "lib/cli-checkin.js"
   },
   "exports": {
     ".": {
@@ -48,6 +49,7 @@
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.client.json",
     "probe": "node lib/cli-probe.js",
     "doctor": "node lib/cli-doctor.js",
+    "checkin": "node lib/cli-checkin.js",
     "test": "vitest run",
     "check": "npm run typecheck && npm run build && npm run test && npm run check:locale",
     "check:locale": "node scripts/check-locale-literals.mjs"

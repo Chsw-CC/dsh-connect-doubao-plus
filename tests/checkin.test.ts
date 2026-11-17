@@ -131,6 +131,72 @@ describe('readDoubaoCheckin', () => {
     expect(view.ok).toBe(false)
   })
 
+  it('finds the daily task when the panel renames its kind or wrapper', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
+      code: 0,
+      data: {
+        tasks: [
+          { task_kind: 'daily_checkin_v2', check_in: { checked_in_today: true, continuous_days: 9 } },
+          { task_kind: 'c2b_guide' },
+        ],
+      },
+    })))
+    const view = await readDoubaoCheckin({ force: true })
+    expect(view.outcome).toBe('already')
+    expect(view.continuousDays).toBe(9)
+  })
+
+  it('falls back to an older campaign group when the current one answers without tasks', async () => {
+    let claimBody: Record<string, unknown> | undefined
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input)
+      const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+      if (url.includes('landing/checkin')) {
+        claimBody = body
+        return jsonResponse({ code: 0, data: { reward_amount: 200 } })
+      }
+      return body.campaign_group_code === 'pc_incentive_task_mvp_v3'
+        ? jsonResponse({ code: 0, data: { tasks: [] } })
+        : jsonResponse(panelBody({ checked: true }))
+    }))
+    const view = await readDoubaoCheckin({ force: true })
+    expect(view.outcome).toBe('already')
+    expect(claimBody).toBeUndefined()
+    await claimDoubaoCheckin()
+    // The claim carries the group that actually answered, under both key names.
+    expect(claimBody?.scene).toBe('pc_incentive_task_mvp_v2')
+    expect(claimBody?.campaign_group_code).toBe('pc_incentive_task_mvp_v2')
+  })
+
+  it('retries the claim on a group that answers instead of giving up', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input)
+      const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+      if (url.includes('landing/checkin')) {
+        return body.campaign_group_code === 'pc_incentive_task_mvp_v3'
+          ? jsonResponse({ code: 710010702 })
+          : jsonResponse({ code: 0, data: { reward_amount: 200 } })
+      }
+      return body.campaign_group_code === 'pc_incentive_task_mvp_v3'
+        ? jsonResponse({ code: 0, data: { tasks: [] } })
+        : jsonResponse(panelBody({ checked: true }))
+    }))
+    const view = await claimDoubaoCheckin()
+    expect(view.outcome).toBe('claimed')
+    expect(view.rewardAmount).toBe(200)
+  })
+
+  it('names the tasks it did see when no daily task is present', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
+      code: 0,
+      data: { tasks: [{ task_kind: 'c2b_guide' }, { task_kind: 'invite_friend' }] },
+    })))
+    const view = await readDoubaoCheckin({ force: true })
+    expect(view.outcome).toBe('no_task')
+    expect(view.error).toContain('c2b_guide')
+    expect(view.error).toContain('invite_friend')
+  })
+
   it('survives padding that is not the panel', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ code: 0, data: {} })))
     const view = await readDoubaoCheckin({ force: true })

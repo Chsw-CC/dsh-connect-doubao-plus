@@ -40,6 +40,24 @@ export const CHECKIN_CLAIM_ENDPOINT = `${CHECKIN_ORIGIN}/alice/ug/campaign/landi
 /** Campaign group this client is enrolled in; the claim carries it as scene. */
 export const CHECKIN_CAMPAIGN_GROUP = 'pc_incentive_task_mvp_v3'
 
+/**
+ * Campaign groups to fall back through, in order.
+ *
+ * The group id is the one part of this surface that changes when Doubao reshuffles
+ * the activity: a renamed group answers `code: 0` with no daily task, which is
+ * indistinguishable from "this account has no check-in" unless we try the older
+ * spellings too. The first group that yields a daily task is remembered for the
+ * claim and for later reads.
+ */
+export const CHECKIN_CAMPAIGN_GROUPS: readonly string[] = [
+  CHECKIN_CAMPAIGN_GROUP,
+  'pc_incentive_task_mvp_v2',
+  'pc_incentive_task_mvp',
+]
+
+/** Group that answered with a daily task last; scoped to the current session. */
+let campaignGroup = CHECKIN_CAMPAIGN_GROUPS[0]
+
 /** Ceiling on one check-in call, in ms. It is a bonus; it never owns the turn. */
 export const CHECKIN_REQUEST_TIMEOUT_MS = 15_000
 
@@ -142,8 +160,16 @@ export function beijingDayKey(now: number = Date.now()): string {
   return new Date(now + BEIJING_OFFSET_MS).toISOString().slice(0, 10)
 }
 
-function campaignQueryUrl(endpoint: string): string {
+function campaignQueryUrl(endpoint: string, pairs?: ReadonlyMap<string, string>): string {
   const params = new URLSearchParams(CAMPAIGN_PARAMS)
+  // `web_id` / `tea_uuid` identify the DEVICE, and the constants above came from
+  // one machine. When the sealed cookie jar carries its own values, those win:
+  // sending another device's ids is the kind of mismatch risk control answers
+  // with a bare, unhelpful failure.
+  for (const name of ['web_id', 'tea_uuid']) {
+    const value = pairs?.get(name)
+    if (value !== undefined && value !== '') params.set(name, value)
+  }
   return `${endpoint}?${params.toString()}`
 }
 
@@ -196,7 +222,7 @@ async function postCampaign(
 
   let response: Response
   try {
-    response = await fetch(campaignQueryUrl(endpoint), {
+    response = await fetch(campaignQueryUrl(endpoint, credentials.pairs), {
       method: 'POST',
       headers: buildHeaders(credentials, { 'content-type': 'application/json' }),
       body: JSON.stringify(body),
@@ -263,6 +289,14 @@ async function postCampaign(
  */
 const DAILY_TASK_KINDS = new Set(['daily_signin', 'daily_checkin'])
 
+/**
+ * Marks that a task whose name we do not recognise still describes today's
+ * check-in. Kept deliberately loose: a rename upstream (`daily_signin_v2`,
+ * `check_in`, or a Chinese `每日签到` task name) must not read as "no activity",
+ * because that is the one answer which hides the button with no error.
+ */
+const DAILY_LABEL = /(^daily[_-]?(check|sign)[_-]?in|^check[_-]?in$|^sign[_-]?in$|签到)/i
+
 interface RawDaily {
   checked_in_today?: unknown
   continuous_days?: unknown
@@ -270,18 +304,73 @@ interface RawDaily {
   reward?: unknown
 }
 
-function dailyOf(body: Record<string, unknown>): RawDaily | undefined {
-  const tasks = Array.isArray(body.tasks) ? body.tasks : []
-  for (const entry of tasks) {
-    if (entry === null || typeof entry !== 'object') continue
-    const task = entry as { task_kind?: unknown; daily_checkin?: unknown; daily_signin?: unknown }
-    if (typeof task.task_kind !== 'string' || !DAILY_TASK_KINDS.has(task.task_kind)) continue
-    const daily = task.daily_checkin ?? task.daily_signin
-    if (daily !== null && daily !== undefined && typeof daily === 'object') return daily as RawDaily
-    // A daily task with no nested block still exists; report it as not claimed.
-    return {}
+/** Every task-shaped object the panel nests anywhere in `data`. */
+function taskEntries(body: Record<string, unknown>, depth = 0): Record<string, unknown>[] {
+  if (depth > 3) return []
+  const out: Record<string, unknown>[] = []
+  for (const [key, value] of Object.entries(body)) {
+    if (Array.isArray(value) && /task/i.test(key)) {
+      for (const item of value) {
+        if (item !== null && typeof item === 'object') out.push(item as Record<string, unknown>)
+      }
+      continue
+    }
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+      out.push(...taskEntries(value as Record<string, unknown>, depth + 1))
+    }
+  }
+  return out
+}
+
+function taskLabel(task: Record<string, unknown>): string | undefined {
+  for (const key of ['task_kind', 'task_type', 'task_name', 'title', 'name']) {
+    const value = task[key]
+    if (typeof value === 'string' && value !== '') return value
   }
   return undefined
+}
+
+/** The task-shaped daily block, however the panel spelled it. */
+function dailyOf(body: Record<string, unknown>): RawDaily | undefined {
+  for (const task of taskEntries(body)) {
+    for (const key of ['daily_checkin', 'daily_signin', 'check_in', 'checkin', 'sign_in']) {
+      const daily = task[key]
+      if (daily !== null && daily !== undefined && typeof daily === 'object') return daily as RawDaily
+    }
+    if ('checked_in_today' in task || 'continuous_days' in task) return task
+    const label = taskLabel(task)
+    if (label !== undefined && (DAILY_TASK_KINDS.has(label) || DAILY_LABEL.test(label))) {
+      // A daily task with no nested block still exists; report it as not claimed.
+      return task
+    }
+  }
+  const nested = body.daily_checkin ?? body.daily_signin
+  if (nested !== null && nested !== undefined && typeof nested === 'object') return nested as RawDaily
+  return undefined
+}
+
+/** Non-secret task labels, for the "no activity" line the card can show. */
+function taskKindsOf(body: Record<string, unknown>): string[] {
+  const seen = new Set<string>()
+  for (const task of taskEntries(body)) {
+    const label = taskLabel(task)
+    if (label !== undefined && seen.size < 8) seen.add(label.slice(0, 24))
+  }
+  return [...seen]
+}
+
+/**
+ * The "no activity" line.
+ *
+ * When the panel DID answer with tasks but none of them is the daily check-in,
+ * naming those tasks is the only way to tell a renamed task from an account that
+ * genuinely has no activity -- otherwise both cases read as the same dead end.
+ */
+function noActivityError(body: Record<string, unknown> | undefined): string {
+  const kinds = body === undefined ? [] : taskKindsOf(body)
+  return kinds.length === 0
+    ? '豆包账号里没有「每日签到」任务（企业 / 飞书账号没有这个玩法）'
+    : `豆包账号里没有「每日签到」任务（面板现有任务：${kinds.join('、')}）`
 }
 
 function rewardOf(daily: RawDaily): { amount: number | null; type: string | null } {
@@ -308,6 +397,9 @@ export function invalidateCheckinCache(): void {
   cached = undefined
   claimedDay = undefined
   inFlight = undefined
+  // The group is discovered per account: a new sign-in must not inherit the
+  // previous account's answer.
+  campaignGroup = CHECKIN_CAMPAIGN_GROUPS[0]
 }
 
 function view(
@@ -346,32 +438,36 @@ export async function readDoubaoCheckin(
   if (inFlight !== undefined) return inFlight
 
   const run = (async (): Promise<DoubaoCheckinView> => {
-    const reply = await postCampaign(CHECKIN_DETAIL_ENDPOINT, {
-      campaign_group_code: CHECKIN_CAMPAIGN_GROUP,
-    })
-    if (reply.kind === 'needs_login') return view('needs_login', day, { error: reply.error })
-    if (reply.kind === 'no_task') return view('no_task', day, { error: reply.error })
-    if (reply.kind === 'failed') return view('failed', day, { error: reply.error })
+    const order = [campaignGroup, ...CHECKIN_CAMPAIGN_GROUPS.filter((group) => group !== campaignGroup)]
+    let lastBody: Record<string, unknown> | undefined
+    let lastNoTask: string | undefined
+    for (const group of order) {
+      const reply = await postCampaign(CHECKIN_DETAIL_ENDPOINT, { campaign_group_code: group })
+      if (reply.kind === 'needs_login') return view('needs_login', day, { error: reply.error })
+      // "No such activity" can be GROUP-specific: a retired v3 with a live v2
+      // answers 710010702 too, so it is not proof until every group has said it.
+      if (reply.kind === 'no_task') { lastNoTask = reply.error; continue }
+      if (reply.kind === 'failed') return view('failed', day, { error: reply.error })
 
-    const daily = dailyOf(reply.body)
-    if (daily === undefined) {
-      return view('no_task', day, {
-        error: '豆包账号里没有「每日签到」任务（企业 / 飞书账号没有这个玩法）',
+      lastBody = reply.body
+      const daily = dailyOf(reply.body)
+      if (daily === undefined) continue
+      campaignGroup = group
+      const reward = rewardOf(daily)
+      const checkedInToday = daily.checked_in_today === true
+      const progress = reply.body.progress
+      return view(checkedInToday ? 'already' : 'failed', day, {
+        continuousDays: numberOf(daily.continuous_days),
+        checkedInToday,
+        rewardAmount: reward.amount,
+        rewardType: reward.type,
+        totalAmount: numberOf(progress !== null && typeof progress === 'object' ? (progress as { total_amount?: unknown }).total_amount : undefined),
+        // "Not claimed yet" is not a failure: the panel simply has nothing to
+        // report until the button (or the scheduler) fires.
+        error: checkedInToday ? null : '今日还未领取',
       })
     }
-    const reward = rewardOf(daily)
-    const checkedInToday = daily.checked_in_today === true
-    const progress = reply.body.progress
-    return view(checkedInToday ? 'already' : 'failed', day, {
-      continuousDays: numberOf(daily.continuous_days),
-      checkedInToday,
-      rewardAmount: reward.amount,
-      rewardType: reward.type,
-      totalAmount: numberOf(progress !== null && typeof progress === 'object' ? (progress as { total_amount?: unknown }).total_amount : undefined),
-      // "Not claimed yet" is not a failure: the panel simply has nothing to
-      // report until the button (or the scheduler) fires.
-      error: checkedInToday ? null : '今日还未领取',
-    })
+    return view('no_task', day, { error: lastNoTask ?? noActivityError(lastBody) })
   })()
 
   inFlight = run
@@ -398,10 +494,26 @@ export async function readDoubaoCheckin(
  */
 export async function claimDoubaoCheckin(): Promise<DoubaoCheckinView> {
   const day = beijingDayKey()
-  const reply = await postCampaign(CHECKIN_CLAIM_ENDPOINT, { scene: CHECKIN_CAMPAIGN_GROUP })
-  if (reply.kind === 'needs_login') return view('needs_login', day, { error: reply.error })
-  if (reply.kind === 'no_task') return view('no_task', day, { error: reply.error })
-  if (reply.kind === 'failed') return view('failed', day, { error: reply.error })
+  const order = [campaignGroup, ...CHECKIN_CAMPAIGN_GROUPS.filter((group) => group !== campaignGroup)]
+  let reply: CampaignReply | undefined
+  let lastNoTask: string | undefined
+  for (const group of order) {
+    // Sending the group under both names costs nothing and survives the case
+    // where upstream moved the claim from `scene` to `campaign_group_code`.
+    const attempt = await postCampaign(CHECKIN_CLAIM_ENDPOINT, {
+      scene: group,
+      campaign_group_code: group,
+    })
+    if (attempt.kind === 'needs_login') return view('needs_login', day, { error: attempt.error })
+    if (attempt.kind === 'no_task') { lastNoTask = attempt.error; continue }
+    if (attempt.kind === 'failed') return view('failed', day, { error: attempt.error })
+    campaignGroup = group
+    reply = attempt
+    break
+  }
+  if (reply === undefined || reply.kind !== 'json') {
+    return view('no_task', day, { error: lastNoTask ?? '豆包账号里没有「每日签到」任务' })
+  }
 
   const outcome: DoubaoCheckinOutcome = reply.body.idempotent === true ? 'already' : 'claimed'
   const granted = numberOf(reply.body.reward_amount)
