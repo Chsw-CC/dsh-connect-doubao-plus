@@ -2,7 +2,7 @@
 
 > 把豆包账号接入 DeepSeek Harness：模型清单直接照抄豆包菜单，扫码登录一次；
 > 思考链与逐模型档位、Seedream 生图、原生 Token 用量、只读额度看板都在 DSH 里完成。
-> 会话只密封在本机（Windows DPAPI / 其它平台 AES-256-GCM），请求只走 `127.0.0.1`。
+> 会话只密封在本机（Windows DPAPI / 其它平台 AES-256-GCM）；Harness 到插件的流量只走 `127.0.0.1`，插件再以你的会话向豆包发起 HTTPS。
 
 [![release](https://img.shields.io/github/v/release/Chsw-CC/dsh-connect-doubao-plus)](https://github.com/Chsw-CC/dsh-connect-doubao-plus/releases)
 [![version](https://img.shields.io/badge/version-0.12.4-blue)](./CHANGELOG.md)
@@ -32,7 +32,7 @@
 
 - **模型目录自动发现** —— 读 `Default/Preferences` 里的菜单缓存，按 `model_item_key` 路由；对话模型与「工作任务」模型（走会员付费额度）分开标注，选任务模型即自动切换完整请求形态。
 - **思考链与思考档位** —— 思考过程逐字透传；档位阶梯来自菜单 `reasoning_effort_config`，逐模型不同，实测值 3 / 4 / 5，更高档仅见菜单声明。深度思考默认开启，`DSH_DOUBAO_DEEP_THINK=0` 可关。
-- **Seedream 生图** —— 端到端打通；图片流式落盘，单图 24 MB、单轮 8 张上限，超限明确报错而不是拖垮进程。
+- **Seedream 生图** —— 端到端打通；图片流式落盘，单图 24 MB、单轮 8 张上限；超限保留远程 URL，不落盘。
 - **额度看板与签到** —— 月度与赠送双窗口、各自倒计时；「天天领额度」一键领取（+200/天），可选每天自动签到（默认关闭，按北京时间日界）。
 - **工具模拟（默认开启）** —— OpenAI `tools` → `doubao-tool` 围栏 → `tool_calls`，让豆包驱动 DSH 本地工具；`toolEmulation: false` 可关。
 - **本地闭环** —— 对话走只监听 `127.0.0.1` 的 shim，带每进程共享密钥，非本机请求一律 401；凭据用 DPAPI / AES-256-GCM 密封，进程内缓存 10 分钟。

@@ -4,7 +4,8 @@
 > own menu, one QR sign-in, and chain-of-thought plus per-model effort ladders, Seedream
 > image generation, native DSH token stats and a read-only quota panel all live inside
 > Harness. The session is sealed on this machine only (DPAPI on Windows, AES-256-GCM
-> elsewhere) and every request stays on `127.0.0.1`.
+> elsewhere); Harness-to-plugin traffic stays on `127.0.0.1`, while the plugin
+> itself talks to Doubao over HTTPS with your session.
 
 [![release](https://img.shields.io/github/v/release/Chsw-CC/dsh-connect-doubao-plus)](https://github.com/Chsw-CC/dsh-connect-doubao-plus/releases)
 [![version](https://img.shields.io/badge/version-0.12.4-blue)](./CHANGELOG.md)
@@ -35,7 +36,7 @@
 
 - **Automatic model discovery** — reads the menu cache under `Default/Preferences` and routes by `model_item_key`; chat models and 「工作任务」 (task-mode, paid membership quota) models are labelled separately, and picking a task model switches the full request shape.
 - **Reasoning passthrough and effort ladders** — thinking content is streamed verbatim; the ladder comes from the per-model `reasoning_effort_config`, measured values 3 / 4 / 5, higher levels declared only in the menu. Deep thinking is on by default; `DSH_DOUBAO_DEEP_THINK=0` turns it off.
-- **Seedream image generation** — end to end; images stream to disk with a 24 MB per-image and 8-per-turn ceiling, and over-limit requests fail loudly instead of exhausting the process.
+- **Seedream image generation** — end to end; images stream to disk with a 24 MB per-image and 8-per-turn ceiling; over-limit images keep their remote URL instead of being written locally.
 - **Quota panel and daily check-in** — monthly and grant windows with separate countdowns; one-click 「天天领额度」 (+200/day), plus an optional automatic check-in (off by default, Beijing-time day boundary).
 - **Tool emulation (on by default)** — OpenAI `tools` → `doubao-tool` fence → `tool_calls`, so Doubao can drive DSH's local tools; disable with `toolEmulation: false`.
 - **Local-only loop** — chat goes through a shim bound to `127.0.0.1` with a per-process shared secret; any non-local request gets 401. Credentials are sealed with DPAPI / AES-256-GCM and cached in-process for 10 minutes.

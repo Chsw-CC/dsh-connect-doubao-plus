@@ -72,7 +72,7 @@ import {
   type DoubaoModelInfo,
   type DoubaoSkillName,
 } from './doubao-catalog.ts'
-import { peekModels } from './doubao-discovery.ts'
+import { isDiscoveredTaskModel, peekModels } from './doubao-discovery.ts'
 import {
   buildToolContract,
   parseToolCalls,
@@ -342,7 +342,12 @@ export function requestOptions(parsed: {
   // name is still a real key, and its mode comes with it: the third-party models
   // are filed under 工作任务 (mode_id "3") with no 「工作任务」 prefix to spot them.
   const discovered = catalogSnapshot().find((model) => model.id === parsed.model)
-  const taskModel = isTaskModel(parsed.model) || discovered?.taskMode === true
+  const taskModel = isTaskModel(parsed.model)
+    || discovered?.taskMode === true
+    // The snapshot falls back to the static list when discovery has not run yet
+    // (or was just invalidated); the last menu dump still knows this model is
+    // task-mode, and losing that flag would send it down the ordinary-chat path.
+    || (parsed.model !== undefined && isDiscoveredTaskModel(parsed.model))
   const think = taskModel
     ? {}
     : {

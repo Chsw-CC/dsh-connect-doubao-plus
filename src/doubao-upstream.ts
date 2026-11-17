@@ -1089,13 +1089,14 @@ async function runToolLocalResponder(
       accept: 'application/json, text/plain, */*',
     })
     delete headers['last-event-id']
+    const epoch = renewalEpoch
     const res = await fetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify(payload),
       ...(signal ? { signal } : {}),
     })
-    absorbSetCookies(res.headers)
+    absorbSetCookies(res.headers, epoch)
     const text = await res.text()
     return JSON.parse(text) as Record<string, any>
   }
@@ -1206,6 +1207,7 @@ async function streamOnce(
   const isTask = taskModeEnabled(options)
 
   let response: Response
+  const epoch = renewalEpoch
   try {
     response = await fetch(url, {
       method: 'POST',
@@ -1236,7 +1238,7 @@ async function streamOnce(
 
   // Fold the server's credential refreshes back into our in-memory jar so the
   // next call stays authenticated.
-  absorbSetCookies(response.headers)
+  absorbSetCookies(response.headers, epoch)
 
   let streamDone = false
   const responderPromise = isTask
@@ -1307,6 +1309,13 @@ export async function streamChat(
 const renewals = new Map<string, string>()
 
 /**
+ * Bumped by every {@link invalidateRenewals}. A response carries the epoch its
+ * request STARTED in; a rotation that lands after a login/revoke is from the
+ * previous session and must not be absorbed into the new one.
+ */
+let renewalEpoch = 0
+
+/**
  * Drop every rotated cookie this module has absorbed.
  *
  * MUST be called together with `invalidateCredentialCache()`. The two caches
@@ -1319,10 +1328,14 @@ const renewals = new Map<string, string>()
  */
 export function invalidateRenewals(): void {
   renewals.clear()
+  renewalEpoch += 1
 }
 
 /** Record rotated cookies (`x-ms-token`, `bd_sso_hi3jfd`) for the next request. */
-function absorbSetCookies(headers: Headers): void {
+function absorbSetCookies(headers: Headers, epoch: number): void {
+  // A request that started before the last invalidation is answering about the
+  // OLD session; overlaying its cookies would resurrect what we just dropped.
+  if (epoch !== renewalEpoch) return
   const msToken = headers.get('x-ms-token')
   if (msToken) renewals.set('msToken', msToken)
   const setCookie = headers.get('set-cookie')
@@ -1371,6 +1384,7 @@ export async function stopGeneration(
     'content-type': 'application/json; encoding=utf-8',
   })
   delete headers['last-event-id']
+  const epoch = renewalEpoch
   const res = await fetch(url, {
     method: 'POST',
     headers,
@@ -1391,7 +1405,7 @@ export async function stopGeneration(
     }),
     signal: AbortSignal.timeout(STOP_GENERATION_TIMEOUT_MS),
   })
-  absorbSetCookies(res.headers)
+  absorbSetCookies(res.headers, epoch)
   const text = await res.text()
   if (!res.ok) throw new Error(`Doubao break_stream_msg failed with HTTP ${res.status}.`)
   let parsed: { status_code?: number }

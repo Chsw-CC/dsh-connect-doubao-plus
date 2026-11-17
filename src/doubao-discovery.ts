@@ -503,6 +503,11 @@ export function discoverModels(now = Date.now()): DoubaoModelInfo[] | undefined 
   )
   if (usable.length === 0) return undefined
   const seenKeys = new Set(usable.map((e) => e.key))
+  // Remembered separately from `memo`: the shim's per-request lookup may run
+  // while `memo` is empty (before the first discovery, or during an
+  // invalidate), and a task-mode model absent from the static list would then
+  // silently lose its 工作任务 shape.
+  discoveredTaskIds.clear()
   const models: DoubaoModelInfo[] = usable
     // Stable order: numeric keys ascending, slugs after, so a rescan cannot
     // shuffle the picker between two identical states.
@@ -517,6 +522,7 @@ export function discoverModels(now = Date.now()): DoubaoModelInfo[] | undefined 
     .map((entry) => {
       const staticMatch = DOUBAO_MODELS.find((m) => m.id === entry.key)
       const taskMode = entry.taskOnly || isTaskModel(entry.key)
+      if (taskMode) discoveredTaskIds.add(entry.key)
       // A discovered task model has no static badge to inherit, and its name is a
       // plain product name (「GLM 5.3」, not 「工作任务 GLM 5.3」) — without this the
       // card would render it as an ordinary chat entry while it runs in task mode.
@@ -553,6 +559,7 @@ export function staticModels(): DoubaoModelInfo[] {
   return [...DOUBAO_MODELS]
 }
 
+const discoveredTaskIds = new Set<string>()
 let memo: { at: number; models: DoubaoModelInfo[] } | undefined
 let httpEntries: DiscoveredEntry[] | undefined
 let httpFetchedAt = 0
@@ -583,6 +590,18 @@ export function liveModels(now = Date.now()): DoubaoModelInfo[] {
  */
 export function peekModels(): DoubaoModelInfo[] | undefined {
   return memo?.models
+}
+
+/**
+ * Whether a model id was filed under 工作任务 by the last menu discovery.
+ *
+ * Deliberately independent of `memo`: the shim asks on the request path even
+ * when no snapshot is resolved yet, and losing this flag would route a task
+ * model through the ordinary-chat shape (wrong `conversation_mode`, no 256k
+ * limit) instead of failing visibly.
+ */
+export function isDiscoveredTaskModel(id: string): boolean {
+  return discoveredTaskIds.has(id)
 }
 
 /**

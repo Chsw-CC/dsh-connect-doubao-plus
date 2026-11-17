@@ -69,6 +69,25 @@ describe('rotated cookies', () => {
     expect(applyRenewals(NEW_SESSION)).toBe(NEW_SESSION)
   })
 
+  it('drops a rotation from a response that started before invalidateRenewals', async () => {
+    // A turn still in flight during a re-login answers about the OLD session.
+    // Its Set-Cookie must not be laid over the fresh one.
+    let release!: (response: Response) => void
+    const gate = new Promise<Response>((resolve) => { release = resolve })
+    vi.stubGlobal('fetch', vi.fn(() => gate))
+
+    const pending = stopGeneration(session(OLD_SESSION), { conversationId: 'c', questionId: 'q' })
+    invalidateRenewals()
+    release(new Response(JSON.stringify({ status_code: 0 }), {
+      status: 200,
+      headers: { 'x-ms-token': 'stale-ms-token', 'set-cookie': 'ttwid=stale-ttwid; Path=/' },
+    }))
+    await pending
+
+    expect(buildHeaders(session(OLD_SESSION)).cookie).toBe(OLD_SESSION)
+    expect(buildHeaders(session(NEW_SESSION)).cookie).toBe(NEW_SESSION)
+  })
+
   it('is what makes a re-login effective: a stale rotation never touches the new session', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(
       JSON.stringify({ status_code: 0 }),
