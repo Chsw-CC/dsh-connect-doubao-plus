@@ -225,6 +225,23 @@ export function createDoubaoAdapter(options: DoubaoAdapterOptions): DoubaoAdapte
     }).catch(() => {})
   }
 
+  /**
+   * One-entry memo for the published model list.
+   *
+   * `getModels()` is called on every picker read and on every dispatch, and each
+   * call used to rebuild a dozen `Model` objects. The inputs are cheap to
+   * compare by identity: the address is a string, the selection is a string
+   * join, and the catalog is the SAME array instance for as long as the
+   * discovery memo holds (a new array means a refresh happened, which is exactly
+   * when the list must rebuild).
+   */
+  let modelCache: {
+    address: string
+    enabledKey: string
+    catalog: readonly DoubaoModelInfo[]
+    models: Model<Api>[]
+  } | undefined
+
   const buildModels = (): Model<Api>[] => {
     // The OpenAI SDK pi-ai drives appends `/chat/completions` to baseURL, so
     // the shim's routes line up with the `/v1` prefix in place. Until the port
@@ -236,8 +253,19 @@ export function createDoubaoAdapter(options: DoubaoAdapterOptions): DoubaoAdapte
     // Filtered by the checklist selection, drawn from the CURRENT catalog (the
     // discovered one when the client cache yields it). A model Doubao adds shows
     // up here on the next rebuild rather than after a plugin release.
-    return enabledModelsOf(enabledIds, (options.modelsProvider ?? (() => DOUBAO_MODELS))())
+    const catalog = (options.modelsProvider ?? (() => DOUBAO_MODELS))()
+    const enabledKey = enabledIds === undefined ? '' : enabledIds.join('\u0000')
+    const cached = modelCache
+    if (cached !== undefined
+      && cached.address === address
+      && cached.enabledKey === enabledKey
+      && cached.catalog === catalog) {
+      return cached.models
+    }
+    const models = enabledModelsOf(enabledIds, catalog)
       .map(info => toPiModel(info, baseUrl, providerId))
+    modelCache = { address, enabledKey, catalog, models }
+    return models
   }
 
   const base = createProvider({

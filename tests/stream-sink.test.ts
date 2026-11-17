@@ -50,16 +50,21 @@ afterEach(() => {
 })
 
 describe('createStreamSink', () => {
-  it('writes straight through while the socket accepts', () => {
+  it('sends the first chunk at once and coalesces the rest of the tick', async () => {
     const res = fakeResponse()
     const sink = createStreamSink(res, { heartbeatMs: 0 })
-    sink.write('a')
-    sink.write('b')
-    expect(res.written).toEqual(['a', 'b'])
+    sink.write('a')               // fast path: nothing pending, goes out now
+    sink.write('b')               // same tick: held for the batch
+    sink.write('c')
+    expect(res.written).toEqual(['a'])
+    // One microtask later the held chunks leave as a SINGLE write, which is the
+    // whole point (each `res.write` costs a syscall + a chunked frame).
+    await Promise.resolve()
+    expect(res.written).toEqual(['a', 'bc'])
     sink.dispose()
   })
 
-  it('queues while blocked and flushes on drain, in order', () => {
+  it('coalesces a queued batch on drain, and flush() empties it synchronously', () => {
     const res = fakeResponse()
     const sink = createStreamSink(res, { heartbeatMs: 0 })
     res.acceptWrites = false
@@ -70,7 +75,24 @@ describe('createStreamSink', () => {
 
     res.acceptWrites = true
     res.emit('drain')
-    expect(res.written).toEqual(['first', 'second', 'third'])
+    expect(res.written).toEqual(['first', 'secondthird'])
+
+    sink.write('tail')
+    sink.flush()
+    expect(res.written).toEqual(['first', 'secondthird', 'tail'])
+    sink.dispose()
+  })
+
+  it('flush() hands a queued batch to a stalled socket instead of dropping it', () => {
+    const res = fakeResponse()
+    const sink = createStreamSink(res, { heartbeatMs: 0 })
+    res.acceptWrites = false
+    sink.write('first')
+    sink.write('second')
+    sink.write('third')
+    // The socket is still "full", but the turn is ending: flush must write anyway.
+    sink.flush()
+    expect(res.written).toEqual(['first', 'secondthird'])
     sink.dispose()
   })
 

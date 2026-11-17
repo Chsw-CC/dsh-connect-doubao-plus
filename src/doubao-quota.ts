@@ -194,9 +194,13 @@ const QUOTA_FAILURE_TTL_MS = 30_000
  * thrown) must go through it: a failure that skips the memo is exactly the bug
  * this exists to prevent.
  */
-function rememberFailure(quota: DoubaoQuota): DoubaoQuota {
-  cachedFailure = quota
-  cachedFailureAt = Date.now()
+function rememberFailure(quota: DoubaoQuota, generation: number): DoubaoQuota {
+  // A read that started before a switch must not publish the old account's
+  // answer; it still returns to its caller, it just does not become the cache.
+  if (generation === quotaGeneration) {
+    cachedFailure = quota
+    cachedFailureAt = Date.now()
+  }
   return quota
 }
 
@@ -266,7 +270,8 @@ export async function fetchQuota(options: { force?: boolean } = {}): Promise<Dou
   // same endpoint. Coalescing them is free: the answer is identical for every
   // caller inside QUOTA_TTL_MS anyway.
   if (inFlight !== undefined) return inFlight
-  const run = requestQuota(now)
+  const generation = quotaGeneration
+  const run = requestQuota(now, generation)
   inFlight = run
   try {
     return await run
@@ -275,8 +280,24 @@ export async function fetchQuota(options: { force?: boolean } = {}): Promise<Dou
   }
 }
 
+/**
+ * The memoised reading, if one is still valid — no request, no promise, no timer.
+ *
+ * `fetchQuota()` is cheap on a cache hit but not free: it allocates a promise
+ * and, via the shim's `quotaGate`, a watchdog timer per call. The request path
+ * asks on EVERY chat turn, and the answer is almost always "here is the reading
+ * you cached a minute ago". This exposes that answer directly so the hot path
+ * can skip the machinery entirely; `undefined` means "would have to go to the
+ * network", which is the only case where the gate's budget is relevant.
+ */
+export function peekQuota(now = Date.now()): DoubaoQuota | undefined {
+  if (cached !== undefined && now - cached.fetchedAt < QUOTA_TTL_MS) return cached
+  if (cachedFailure !== undefined && now - cachedFailureAt < QUOTA_FAILURE_TTL_MS) return cachedFailure
+  return undefined
+}
+
 /** One uncached read. Never throws; every exit path returns a memoised failure. */
-async function requestQuota(now: number): Promise<DoubaoQuota> {
+async function requestQuota(now: number, generation: number): Promise<DoubaoQuota> {
   const credentials = loadDoubaoCredentials()
   if (!credentials.ok) {
     return rememberFailure({
@@ -284,7 +305,7 @@ async function requestQuota(now: number): Promise<DoubaoQuota> {
       windows: [],
       fetchedAt: now,
       error: credentials.reason ?? 'Doubao credentials unavailable.',
-    })
+    }, generation)
   }
 
   try {
@@ -298,7 +319,7 @@ async function requestQuota(now: number): Promise<DoubaoQuota> {
       signal: AbortSignal.timeout(QUOTA_REQUEST_TIMEOUT_MS),
     })
     if (!response.ok) {
-      return rememberFailure({ exhausted: false, windows: [], fetchedAt: now, error: `HTTP ${response.status}` })
+      return rememberFailure({ exhausted: false, windows: [], fetchedAt: now, error: `HTTP ${response.status}` }, generation)
     }
     const payload = (await response.json()) as { data?: RawQuotaData }
 
@@ -330,8 +351,10 @@ async function requestQuota(now: number): Promise<DoubaoQuota> {
       quota.planActive = payload.data.member_info.hasActiveSubscription
     }
 
-    cached = quota
-    cachedFailure = undefined
+    if (generation === quotaGeneration) {
+      cached = quota
+      cachedFailure = undefined
+    }
     return quota
   } catch (error) {
     // The timeout surfaces as `TimeoutError` (or `AbortError` on older lines);
@@ -340,7 +363,7 @@ async function requestQuota(now: number): Promise<DoubaoQuota> {
     const message = name === 'TimeoutError' || name === 'AbortError'
       ? `豆包额度接口 ${Math.round(QUOTA_REQUEST_TIMEOUT_MS / 1000)} 秒未响应`
       : (error as Error).message
-    return rememberFailure({ exhausted: false, windows: [], fetchedAt: now, error: message })
+    return rememberFailure({ exhausted: false, windows: [], fetchedAt: now, error: message }, generation)
   }
 }
 
@@ -350,9 +373,17 @@ let cachedFailure: DoubaoQuota | undefined
 let cachedFailureAt = 0
 /** The read currently on the wire, shared by every caller that asks meanwhile. */
 let inFlight: Promise<DoubaoQuota> | undefined
+/**
+ * Advances on every invalidation. A read may publish only while its generation
+ * is current, and `inFlight` is dropped so a later forced read cannot join a
+ * request that belongs to the previous account.
+ */
+let quotaGeneration = 0
 
 /** Drop the cached reading so the next call hits the server. */
 export function invalidateQuotaCache(): void {
+  quotaGeneration += 1
+  inFlight = undefined
   cached = undefined
   // A forced refresh is the user saying "the panel is wrong": it must not be
   // answered from the failure memo either.

@@ -24,6 +24,8 @@
  * @module dsh-connect-doubao-plus/tokens
  */
 
+import { createHash } from 'node:crypto'
+
 export interface TokenizableToolCall {
   id?: string
   type?: string
@@ -117,8 +119,7 @@ function isAsciiWordChar(code: number): boolean {
  * Every code-unit weight is >= 0.25, guaranteeing `estimateTextTokens(s) >=
  * Math.ceil(s.length / 4)` for any non-empty string.
  */
-export function estimateTextTokens(text: string): number {
-  if (text.length === 0) return 0
+function countTextTokens(text: string): number {
   let score = 0
   for (let i = 0; i < text.length; i += 1) {
     const code = text.charCodeAt(i)
@@ -144,6 +145,65 @@ export function estimateTextTokens(text: string): number {
     }
   }
   return Math.max(1, Math.ceil(score))
+}
+
+/**
+ * Results for long strings, keyed by a digest of the text itself.
+ *
+ * WHY. Every turn prices the WHOLE inbound transcript, and the Harness resends
+ * it verbatim: on a long agent session that is hundreds of kilobytes re-scanned
+ * by a JavaScript char loop on every request — tens of milliseconds of the
+ * event loop that no other request can use. The content is identical between
+ * turns except for the tail, so the count is cacheable.
+ *
+ * The key is a SHA-1 of the text rather than the text itself: hashing is native
+ * (an order of magnitude faster than the loop) and the cache then holds 40-byte
+ * keys instead of megabyte strings. SHA-1 is used purely as a fingerprint here
+ * — a collision would mis-price one message, the adversarial case for a hash
+ * choice that a token estimate does not present.
+ *
+ * Short strings skip the cache: the digest costs more than the count, and they
+ * are re-read a handful of code units at a time.
+ */
+const TEXT_COUNT_CACHE_MAX = 4096
+const TEXT_COUNT_CACHE_MIN_LENGTH = 256
+const textCountCache = new Map<string, number>()
+
+/** Visible for tests and for a future /stats counter; not part of the pricing path. */
+export function tokenEstimateCacheSize(): number {
+  return textCountCache.size
+}
+
+/** Drop cached counts. Only needed by tests that pin exact cache behaviour. */
+export function clearTokenEstimateCache(): void {
+  textCountCache.clear()
+}
+
+/**
+ * Count tokens for a string, reusing a digest-keyed result for long inputs.
+ *
+ * The returned number is identical to `countTextTokens(text)`: the cache sits
+ * in front of the loop and never changes the answer.
+ */
+export function estimateTextTokens(text: string): number {
+  if (text.length === 0) return 0
+  if (text.length < TEXT_COUNT_CACHE_MIN_LENGTH) return countTextTokens(text)
+  const key = createHash('sha1').update(text).digest('base64url')
+  const cached = textCountCache.get(key)
+  if (cached !== undefined) {
+    // Re-insert so the eviction order is least-recently-USED, not oldest-first.
+    textCountCache.delete(key)
+    textCountCache.set(key, cached)
+    return cached
+  }
+  const value = countTextTokens(text)
+  textCountCache.set(key, value)
+  while (textCountCache.size > TEXT_COUNT_CACHE_MAX) {
+    const oldest = textCountCache.keys().next().value
+    if (oldest === undefined) break
+    textCountCache.delete(oldest)
+  }
+  return value
 }
 
 /** Estimate tokens for an inbound OpenAI message `content` field. */

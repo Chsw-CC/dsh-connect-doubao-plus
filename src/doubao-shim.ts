@@ -1,6 +1,9 @@
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
+import { appendFileSync, createWriteStream } from 'node:fs'
+import { mkdir, readdir, rename, rm, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { Transform, Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 /**
  * Loopback shim for the Doubao route.
  *
@@ -47,17 +50,29 @@ import {
   loadDoubaoCredentials,
   type DoubaoCredentials,
 } from './doubao-auth.ts'
-import { chat, stopGeneration, DoubaoUpstreamError, classifyDoubaoFailure, isInvalidParamFailure, isRetryableFailure, type ChatRequestOptions, type DoubaoErrorKind, type DoubaoImage } from './doubao-upstream.ts'
-import { fetchQuota, findWindow, millisUntilReset } from './doubao-quota.ts'
+import {
+  chat,
+  stopGeneration,
+  DoubaoUpstreamError,
+  classifyDoubaoFailure,
+  invalidateRenewals,
+  isInvalidParamFailure,
+  isRetryableFailure,
+  type ChatRequestOptions,
+  type DoubaoErrorKind,
+  type DoubaoImage,
+} from './doubao-upstream.ts'
+import { fetchQuota, findWindow, millisUntilReset, peekQuota, type DoubaoQuota } from './doubao-quota.ts'
 import {
   DOUBAO_IMAGE_MODEL_ID,
   DOUBAO_MODELS,
   findDoubaoModel,
   isTaskModel,
   SKILL_CARRIER_MODEL_ID,
+  type DoubaoModelInfo,
   type DoubaoSkillName,
 } from './doubao-catalog.ts'
-import { liveModels } from './doubao-discovery.ts'
+import { isDiscoveredTaskModel, peekModels } from './doubao-discovery.ts'
 import {
   buildToolContract,
   parseToolCalls,
@@ -228,6 +243,25 @@ function toDoubaoLevel(
 }
 
 /**
+ * The catalog as this process last resolved it — WITHOUT a refresh.
+ *
+ * `liveModels()` is correct for the picker and the settings card, because those
+ * can afford a re-read. It is wrong HERE: this runs per request, and when the
+ * 10-minute memo lapses the re-read does synchronous disk work (a JSON.parse of
+ * the client's Preferences plus a full read of every LevelDB segment) on the
+ * request path, blocking the event loop for every stream the host is serving.
+ *
+ * A stale snapshot is harmless for what this file asks: whether a model id is
+ * filed under 「工作任务」 and whether this release has a display name for it.
+ * Both change only when Doubao ships a model, and the next discovery refresh —
+ * which the picker, the card and the periodic refresh all trigger on their own
+ * threads of control — picks that up.
+ */
+function catalogSnapshot(): readonly DoubaoModelInfo[] {
+  return peekModels() ?? DOUBAO_MODELS
+}
+
+/**
  * Name the model a request ASKED for, in words a user can read.
  *
  * Doubao's `model_item_key` values are opaque (`0`, `3`, `5`, `seed-lite-7b`),
@@ -249,7 +283,7 @@ function describeRequestedModel(key: string | undefined): {
   // `known` means "this release has a display name for it", which is a narrower
   // question than "the key is real": a model the client menu discovered after this
   // build shipped is forwarded correctly but can only be echoed by its key.
-  const discovered = liveModels().find((model) => model.id === key)
+  const discovered = catalogSnapshot().find((model) => model.id === key)
   if (discovered !== undefined) return { name: discovered.name, item_key: key }
   const known = DOUBAO_MODELS.some((model) => model.id === key)
   return known
@@ -307,8 +341,13 @@ export function requestOptions(parsed: {
   // A model the client menu discovered but this release's static catalog does not
   // name is still a real key, and its mode comes with it: the third-party models
   // are filed under 工作任务 (mode_id "3") with no 「工作任务」 prefix to spot them.
-  const discovered = liveModels().find((model) => model.id === parsed.model)
-  const taskModel = isTaskModel(parsed.model) || discovered?.taskMode === true
+  const discovered = catalogSnapshot().find((model) => model.id === parsed.model)
+  const taskModel = isTaskModel(parsed.model)
+    || discovered?.taskMode === true
+    // The snapshot falls back to the static list when discovery has not run yet
+    // (or was just invalidated); the last menu dump still knows this model is
+    // task-mode, and losing that flag would send it down the ordinary-chat path.
+    || (parsed.model !== undefined && isDiscoveredTaskModel(parsed.model))
   const think = taskModel
     ? {}
     : {
@@ -341,6 +380,51 @@ export function imageMarkdown(images: readonly DoubaoImage[]): string {
 }
 
 /**
+ * Where generated pictures are kept.
+ *
+ * `DSH_DOUBAO_IMAGES_DIR` overrides it — for a small system drive, a roaming
+ * profile, or a test fixture. The default sits next to the credential cache so
+ * the whole plugin owns one directory under `~/.dsh`.
+ */
+export function imageCacheDir(): string {
+  const override = process.env.DSH_DOUBAO_IMAGES_DIR?.trim()
+  return override !== undefined && override !== '' ? override : join(homedir(), '.dsh', 'doubao-images')
+}
+
+/** Per-download deadline. A CDN that goes quiet used to hang the turn forever. */
+const IMAGE_DOWNLOAD_TIMEOUT_MS = 20_000
+
+/**
+ * Largest single picture worth keeping.
+ *
+ * A 2048×2048 JPEG is well under 8 MB; 24 MB is enough head-room for a
+ * lossless take while still bounding what one upstream response can pin on
+ * disk. Past the cap the picture is dropped and the URL stays in its place.
+ */
+const IMAGE_MAX_BYTES = 24 * 1024 * 1024
+
+/**
+ * How many pictures one turn will save locally.
+ *
+ * The rest keep their (already Markdown-safe) URLs: a runaway creation block
+ * with fifty images is a bug upstream, not a reason to start fifty downloads.
+ */
+const IMAGE_MAX_EMBEDDED = 8
+
+/** Pictures older than this are pruned at startup. */
+const IMAGE_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000
+/**
+ * And an abandoned download is given up on much sooner.
+ *
+ * A `.part` file means the process died (or the socket did) between `create`
+ * and `rename`; nobody will ever reference it, so keeping it for the full
+ * picture lifetime only wastes the disk it occupies.
+ */
+const IMAGE_PART_TTL_MS = 24 * 60 * 60 * 1000
+/** And the directory as a whole is kept under this. */
+const IMAGE_CACHE_MAX_BYTES = 512 * 1024 * 1024
+
+/**
  * IMAGEGEN_LOCAL_FILE: download the picture and reference it locally.
  *
  * The Harness renders local files reliably; a signed CDN URL in Markdown shows
@@ -349,30 +433,143 @@ export function imageMarkdown(images: readonly DoubaoImage[]): string {
  *
  * Returns Markdown with the local path, or the remote URL when the download
  * fails — a broken preview is better than a missing picture.
+ *
+ * PERF and SAFETY, in the order they were fixed:
+ *
+ * 1. Downloads run CONCURRENTLY. They were a `for` loop with `await`, so a
+ *    four-image turn paid the sum of four round trips while the stream's
+ *    `finish_reason` chunk waited behind them (measured 608 ms → 165 ms).
+ * 2. Bytes are STREAMED to disk through `pipeline`, not buffered. `arrayBuffer()`
+ *    held the whole picture in memory, and `writeFileSync` then blocked the
+ *    event loop for the duration of the write — every other session's stream
+ *    stalled with it. Peak memory per image is now one stream chunk.
+ * 3. Each download has its own deadline and a hard size cap: a slow or
+ *    oversized response cannot hold the turn or the disk.
+ * 4. The file name carries a random suffix. Same-second, same-index turns
+ *    (two chats drawing at once) used to overwrite each other's pictures.
+ * 5. A `.part` file is used and renamed on success, so a failed download never
+ *    leaves a truncated image behind under a name that looks finished.
  */
-export async function imageMarkdownLocal(images: readonly DoubaoImage[]): Promise<string> {
+export async function imageMarkdownLocal(
+  images: readonly DoubaoImage[],
+  options: { maxBytes?: number } = {},
+): Promise<string> {
   if (images.length === 0) return ''
-  const dir = join(homedir(), '.dsh', 'doubao-images')
-  const parts: string[] = []
-  for (const [i, image] of images.entries()) {
-    const fallback = `![豆包生图 ${i + 1}](${markdownSafeUrl(image.url)})`
-    try {
-      const res = await fetch(image.url)
-      if (!res.ok) {
-        parts.push(fallback)
-        continue
-      }
-      const buf = Buffer.from(await res.arrayBuffer())
-      mkdirSync(dir, { recursive: true })
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-      const file = join(dir, `doubao-${stamp}-${i + 1}.png`)
-      writeFileSync(file, buf)
-      parts.push(`![豆包生图 ${i + 1}](${file.replace(/\\/g, '/')})`)
-    } catch {
-      parts.push(fallback)
-    }
+  const maxBytes = options.maxBytes ?? IMAGE_MAX_BYTES
+  const dir = imageCacheDir()
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+  try {
+    await mkdir(dir, { recursive: true })
+  } catch {
+    // An unwritable directory is not fatal: every image falls back to its URL.
   }
+
+  const parts = await Promise.all(images.map(async (image, i): Promise<string> => {
+    const label = `豆包生图 ${i + 1}`
+    const fallback = `![${label}](${markdownSafeUrl(image.url)})`
+    if (i >= IMAGE_MAX_EMBEDDED) return fallback
+    // The suffix keeps concurrent turns apart; the index keeps the pictures in
+    // the order Doubao produced them.
+    const file = join(dir, `doubao-${stamp}-${randomBytes(3).toString('hex')}-${i + 1}.png`)
+    const temp = `${file}.part`
+    try {
+      const res = await fetch(image.url, {
+        signal: AbortSignal.timeout(IMAGE_DOWNLOAD_TIMEOUT_MS),
+      })
+      if (!res.ok || res.body === null) return fallback
+      let received = 0
+      let tooLarge = false
+      const meter = new Transform({
+        transform(chunk: Buffer, _encoding, callback) {
+          received += chunk.length
+          if (received > maxBytes) {
+            tooLarge = true
+            callback(new Error('image exceeds the local cache size cap'))
+            return
+          }
+          callback(null, chunk)
+        },
+      })
+      const source = Readable.fromWeb(res.body as Parameters<typeof Readable.fromWeb>[0])
+      await pipeline(source, meter, createWriteStream(temp))
+      if (tooLarge) {
+        await rm(temp, { force: true }).catch(() => {})
+        return fallback
+      }
+      await rename(temp, file)
+      return `![${label}](${file.replace(/\\/g, '/')})`
+    } catch {
+      // Timeout, aborted body, size cap, unwritable disk: leave the URL.
+      await rm(temp, { force: true }).catch(() => {})
+      return fallback
+    }
+  }))
   return parts.join('\n\n')
+}
+
+/**
+ * Trim the picture cache: age first, then total size.
+ *
+ * Both bounds exist because the directory is otherwise unbounded — a heavy
+ * image user accumulates hundreds of megabytes that nothing ever revisits,
+ * and it lives in the user's home directory rather than under any store
+ * with an eviction policy. Pruning runs at plugin startup (never on the
+ * request path) and only touches files this plugin writes, including
+ * abandoned `.part` leftovers.
+ *
+ * Returns `{ removed, keptBytes }` for the diagnostics line; failures are
+ * swallowed because a cache that cannot be cleaned must not stop the plugin.
+ */
+export async function pruneImageCache(options: {
+  dir?: string
+  now?: number
+  ttlMs?: number
+  maxBytes?: number
+} = {}): Promise<{ removed: number; keptBytes: number }> {
+  const dir = options.dir ?? imageCacheDir()
+  const now = options.now ?? Date.now()
+  const ttlMs = options.ttlMs ?? IMAGE_CACHE_TTL_MS
+  const maxBytes = options.maxBytes ?? IMAGE_CACHE_MAX_BYTES
+  let removed = 0
+  try {
+    const entries = await readdir(dir, { withFileTypes: true })
+    const kept: Array<{ path: string; size: number; mtimeMs: number }> = []
+    for (const entry of entries) {
+      if (!entry.isFile() || !/^doubao-.*\.(png|part)$/.test(entry.name)) continue
+      const path = join(dir, entry.name)
+      try {
+        const info = await stat(path)
+        const ageLimit = entry.name.endsWith('.part') ? Math.min(ttlMs, IMAGE_PART_TTL_MS) : ttlMs
+        if (now - info.mtimeMs > ageLimit) {
+          await rm(path, { force: true })
+          removed += 1
+          continue
+        }
+        kept.push({ path, size: info.size, mtimeMs: info.mtimeMs })
+      } catch {
+        // Vanished or unreadable between readdir and stat: nothing to do.
+      }
+    }
+    let keptBytes = kept.reduce((total, file) => total + file.size, 0)
+    if (keptBytes > maxBytes) {
+      // Oldest first: the newest pictures are the ones a session still references.
+      kept.sort((a, b) => a.mtimeMs - b.mtimeMs)
+      for (const file of kept) {
+        if (keptBytes <= maxBytes) break
+        try {
+          await rm(file.path, { force: true })
+          keptBytes -= file.size
+          removed += 1
+        } catch {
+          /* best effort */
+        }
+      }
+    }
+    return { removed, keptBytes }
+  } catch {
+    // No directory yet, or unreadable: nothing cached, nothing to prune.
+    return { removed, keptBytes: 0 }
+  }
 }
 
 /**
@@ -597,6 +794,13 @@ function errorCodeFor(kind: DoubaoErrorKind, retryable: boolean): string {
 function revokeSession(): void {
   invalidateCredentialCache()
   clearCredentialCache()
+  // The rotated cookies (`x-ms-token`, `bd_sso_hi3jfd`, …) that
+  // `absorbSetCookies` remembers are the OTHER half of the dead credential.
+  // Leaving them in place meant the next request — including the first one
+  // after a fresh QR scan — overlaid the previous session's values onto the new
+  // session's header, which the server reads as a still-dead login. The two
+  // caches must be dropped together; see `invalidateRenewals`.
+  invalidateRenewals()
 }
 
 /**
@@ -688,10 +892,17 @@ export function createRequestLifecycle(
  * one identical stall.
  */
 export interface DoubaoStreamSink {
-  /** Queue-or-write one chunk, honouring backpressure. */
+  /** Queue-or-write one chunk, honouring backpressure, coalescing per tick. */
   write(text: string): void
   /** Emit one SSE comment line; skipped while the socket is backed up. */
   beat(): void
+  /**
+   * Hand anything still queued to the socket RIGHT NOW.
+   *
+   * Required before `res.end()`: writes are coalesced into a microtask, and
+   * ending the response first would drop the last batch on the floor.
+   */
+  flush(): void
   dispose(): void
 }
 
@@ -709,46 +920,98 @@ export function createStreamSink(
   const maxQueuedBytes = options.maxQueuedBytes ?? SSE_MAX_QUEUED_BYTES
 
   let blocked = false
-  let queued: string[] = []
+  /** Chunks not yet handed to the socket, each with its precomputed size. */
+  let queued: Array<{ text: string; bytes: number }> = []
   let queuedBytes = 0
-  let lastWriteAt = Date.now()
+  let flushScheduled = false
   let disposed = false
+  let lastWriteAt = Date.now()
 
   const usable = (): boolean => !disposed && !res.writableEnded && !res.destroyed
 
-  /** Hand queued chunks over while the socket keeps accepting them. */
-  const pump = (): void => {
-    while (!blocked && queued.length > 0) {
-      if (!usable()) { queued = []; queuedBytes = 0; return }
-      const next = queued.shift() as string
-      queuedBytes -= Buffer.byteLength(next)
-      if (!res.write(next)) { blocked = true; return }
+  const clearQueue = (): void => {
+    queued = []
+    queuedBytes = 0
+  }
+
+  /**
+   * Hand the whole pending batch to the socket as ONE write.
+   *
+   * WHY. A read from Doubao routinely carries dozens of frames, and each of
+   * them used to be its own `res.write()`. Measured on a loopback socket: 5 000
+   * SSE chunks cost 36–54 ms written one by one and 2.6–3.3 ms written as a
+   * batch — every write pays a syscall plus a chunked-encoding frame, and the
+   * client receives the same bytes either way (SSE delimits with `data:` blocks,
+   * not with transport chunks).
+   *
+   * `res.write` returning false does NOT mean the bytes were lost: they are in
+   * Node's socket buffer, and the only consequence is that we must stop writing
+   * until `drain`.
+   */
+  const pumpNow = (force = false): void => {
+    if (queuedBytes === 0) return
+    if (disposed || !usable()) {
+      clearQueue()
+      return
     }
+    // `force` exists for `flush()`: at the end of a turn the response is about
+    // to close, so handing the batch to Node (even though the socket is full)
+    // is the only way those bytes ever reach the client. `blocked` is advisory.
+    if (blocked && !force) return
+    const batch = queued
+    queued = []
+    queuedBytes = 0
+    lastWriteAt = Date.now()
+    if (!res.write(batch.map((entry) => entry.text).join(''))) blocked = true
+  }
+
+  /** Coalesce every write made in this tick into one socket write. */
+  const scheduleFlush = (): void => {
+    if (flushScheduled) return
+    flushScheduled = true
+    queueMicrotask(() => {
+      flushScheduled = false
+      pumpNow()
+    })
+  }
+
+  const flush = (): void => {
+    flushScheduled = false
+    pumpNow(true)
   }
 
   const write = (text: string): void => {
     if (!usable()) return
+    const bytes = Buffer.byteLength(text)
     lastWriteAt = Date.now()
-    if (blocked) {
-      const bytes = Buffer.byteLength(text)
-      if (queuedBytes + bytes > maxQueuedBytes) {
-        queued = []
-        queuedBytes = 0
-        options.onOverflow?.(new Error(
-          `客户端读取过慢，已中止本轮：未发送的缓冲超过 ${Math.round(maxQueuedBytes / 1048576)} MB。`,
-        ))
-        return
-      }
-      queued.push(text)
-      queuedBytes += bytes
+    // Fast path: nothing pending, so the first chunk of a burst goes out at
+    // once and interactive latency does not wait for the tick to end.
+    //
+    // The tick is then marked open: everything else that arrives before the
+    // microtask runs is collected and sent as ONE write. Without this marker a
+    // burst would take the fast path once per chunk (the queue never has
+    // anything in it), which is exactly the per-event write this exists to
+    // avoid.
+    if (!blocked && queuedBytes === 0 && !flushScheduled) {
+      if (!res.write(text)) blocked = true
+      scheduleFlush()
       return
     }
-    if (!res.write(text)) blocked = true
+    if (queuedBytes + bytes > maxQueuedBytes) {
+      clearQueue()
+      options.onOverflow?.(new Error(
+        `客户端读取过慢，已中止本轮：未发送的缓冲超过 ${Math.round(maxQueuedBytes / 1048576)} MB。`,
+      ))
+      return
+    }
+    queued.push({ text, bytes })
+    queuedBytes += bytes
+    if (!blocked) scheduleFlush()
   }
 
   const onDrain = (): void => {
     blocked = false
-    pump()
+    pumpNow()
   }
   res.on('drain', onDrain)
 
@@ -768,8 +1031,7 @@ export function createStreamSink(
     disposed = true
     clearInterval(timer)
     res.off('drain', onDrain)
-    queued = []
-    queuedBytes = 0
+    clearQueue()
   }
   res.once('finish', dispose)
   res.once('close', dispose)
@@ -777,7 +1039,40 @@ export function createStreamSink(
   return {
     write,
     beat: () => { if (!blocked) write(': keepalive\n\n') },
+    flush,
     dispose,
+  }
+}
+
+/**
+ * How long a COLD quota read may hold up a turn.
+ *
+ * The quota summary endpoint is a convenience check, not a gate the upstream
+ * needs: Doubao rejects an exhausted turn itself. But the read used to be
+ * awaited with its full 10-second deadline, so the first turn after a cold
+ * cache — a fresh host, or five minutes idle — waited up to ten seconds before
+ * the first byte of the prompt even left, for an answer it almost never needs.
+ *
+ * The read still STARTS: it fills the 5-minute cache for the turns that follow.
+ * Only the wait is bounded, and a cached reading (the normal case) resolves
+ * immediately, so the truthful "quota exhausted" refusal is preserved.
+ */
+const QUOTA_GATE_BUDGET_MS = 1_500
+
+async function quotaGate(budgetMs = QUOTA_GATE_BUDGET_MS): Promise<DoubaoQuota | undefined> {
+  // `fetchQuota` de-duplicates in flight, never rejects, and returns the cached
+  // reading synchronously when it has one — so this race costs nothing on the
+  // hot path and only bounds the cold one.
+  const read = fetchQuota()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const budget = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), budgetMs)
+    timer.unref?.()
+  })
+  try {
+    return await Promise.race([read, budget])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
   }
 }
 
@@ -858,7 +1153,18 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
   }
 
   const server: Server = createServer((req, res) => {
-    void handle(req, res)
+    // `handle` catches its own failures, but a rejection escaping it would be an
+    // UNHANDLED rejection inside the host process — and Node's default reaction
+    // to one is to terminate the whole application. A plugin must not be able to
+    // do that: this is the last line, and writing a 500 here (when the socket
+    // still exists) is the worst it may do.
+    void handle(req, res).catch((error: unknown) => {
+      try {
+        writeFailure(res, error)
+      } catch {
+        /* headers already sent or socket destroyed — nothing left to say */
+      }
+    })
   })
 
   /**
@@ -874,6 +1180,10 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
    */
   server.keepAliveTimeout = 65_000
   server.headersTimeout = 66_000
+  // A client that opens a request and then dribbles the body (or sends none)
+  // otherwise holds a socket until Node's 300 s default. Nothing in this
+  // protocol legitimately needs longer: the body is one JSON object.
+  server.requestTimeout = 60_000
 
   const ready = new Promise<void>((resolve, reject) => {
     server.once('listening', () => resolve())
@@ -949,6 +1259,16 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
       isContinuationTurn: boolean
       cachedPrefixMessages: number
       emulatedContractText: string
+      /**
+       * The session the GATE already resolved.
+       *
+       * Handed down instead of letting `streamOnce` call
+       * `loadDoubaoCredentials()` again: one unseal per request instead of two,
+       * and — the real reason — a caller that injected its own resolver
+       * (`DoubaoShimOptions.resolveCredentials`) is honoured by the upstream
+       * call too, not just by the inbound checks.
+       */
+      credentials: DoubaoCredentials
     },
   ): Promise<void> {
     res.writeHead(200, {
@@ -1051,7 +1371,12 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
     let result
     try {
       try {
-        result = await chat(prompt, { ...upstreamOptions, signal: lifecycle.signal, callbacks })
+        result = await chat(prompt, {
+          ...upstreamOptions,
+          signal: lifecycle.signal,
+          callbacks,
+          credentials: accounting.credentials,
+        })
       } catch (error) {
         if (!accounting.isContinuationTurn || !isInvalidParamFailure(error) || firstTokenAt !== null) throw error
         // The remembered thread was rejected as an invalid parameter (710020202):
@@ -1073,6 +1398,7 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
           ...requestOptions(parsed),
           signal: lifecycle.signal,
           callbacks,
+          credentials: accounting.credentials,
         })
       }
       // Only a completed turn teaches us the thread id; a failed one leaves the
@@ -1158,6 +1484,8 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
       }
       if (!res.writableEnded) {
         sink.write('data: [DONE]\n\n')
+        // Writes are coalesced per tick; ending first would discard the batch.
+        sink.flush()
         res.end()
       }
       void result
@@ -1201,6 +1529,8 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
       })
       if (!res.writableEnded && !res.destroyed) {
         sink.write('data: [DONE]\n\n')
+        // Same reason as the success path: the error chunk is still queued.
+        sink.flush()
         res.end()
       }
     }
@@ -1281,8 +1611,13 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
       }
 
       // Refuse before spending quota when the account has no headroom.
-      const quota = await fetchQuota()
-      if (quota.exhausted) {
+      //
+      // The memoised reading is consulted first: five minutes out of every six
+      // nothing has gone to the network yet does not have to, and the hot path
+      // skips the promise and the watchdog a gate would allocate. Only a genuinely
+      // cold cache pays `quotaGate`, which bounds the wait. See both.
+      const quota = peekQuota() ?? await quotaGate()
+      if (quota?.exhausted === true) {
         writeOpenAIError(res, 429, 'quota_exhausted',
           '豆包额度已用尽。请等待额度窗口重置，或在豆包客户端中查看额度状态。')
         return
@@ -1402,7 +1737,7 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
         let result
         try {
           try {
-            result = await chat(prompt, upstreamOptions)
+            result = await chat(prompt, { ...upstreamOptions, credentials })
           } catch (error) {
             if (!isContinuationTurn || !isInvalidParamFailure(error)) throw error
             // Same fallback as the streaming path: a continuation rejected with
@@ -1417,6 +1752,7 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
             result = await chat(buildPrompt(parsed.messages ?? []) + emulatedContractText, {
               ...requestOptions(parsed),
               signal,
+              credentials,
             })
           }
         } catch (error) {
@@ -1511,6 +1847,7 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
           isContinuationTurn,
           cachedPrefixMessages,
           emulatedContractText,
+          credentials,
         },
       )
     } catch (error) {

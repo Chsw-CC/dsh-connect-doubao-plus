@@ -36,10 +36,10 @@
  *
  * @module dsh-connect-doubao-plus/discovery
  */
-import { readFileSync, readdirSync, existsSync } from 'node:fs'
+import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { findDoubaoUserDataDir, loadDoubaoCredentials } from './doubao-auth.ts'
-import { listDoubaoProfiles } from './doubao-profile.ts'
+import { currentProfileOverride, listDoubaoProfiles } from './doubao-profile.ts'
 import {
   ACTION_BAR_BRIEF_LIST_ENDPOINT,
   buildHeaders,
@@ -92,6 +92,15 @@ export const TASK_MODE_PREFIX = '工作任务'
  * keeps current. Both are scanned and merged per key, so listing both can only
  * ever add models, never change an existing one.
  */
+/**
+ * Largest LevelDB segment worth reading.
+ *
+ * The menu cache lives in a few hundred kilobytes; a multi-megabyte segment is
+ * either someone else's database in the same folder or a compaction artefact,
+ * and reading it synchronously costs the host more than the models it yields.
+ */
+const MAX_CACHE_FILE_BYTES = 24 * 1024 * 1024
+
 const CACHE_DB_DIRS = [
   'chrome_doubao-chat_0.indexeddb.leveldb',
   'chrome_doubao-launcher_0.indexeddb.leveldb',
@@ -227,6 +236,13 @@ function scanDir(dir: string): Map<string, DiscoveredEntry> {
   try { files = readdirSync(dir) } catch { return found }
   for (const file of files) {
     if (!/\.(log|ldb)$/.test(file)) continue
+    // A LevelDB segment can be tens of megabytes, and this read is synchronous:
+    // a runaway file used to stall the whole host while the menu cache was
+    // rebuilt. The model menu is a few hundred kilobytes, so anything past the
+    // cap is not it.
+    let size = 0
+    try { size = statSync(join(dir, file)).size } catch { continue }
+    if (size === 0 || size > MAX_CACHE_FILE_BYTES) continue
     let buf: Buffer
     try { buf = readFileSync(join(dir, file)) } catch { continue }
     for (const entry of parseCacheBuffer(buf)) {
@@ -246,6 +262,11 @@ function candidateProfileDirs(): string[] {
     seen.add(key)
     dirs.push(dir)
   }
+  // The user's own pick first: `listDoubaoProfiles` is Windows-only (the
+  // desktop client is), but an explicitly chosen directory must work on
+  // macOS/Linux too — that is how a mounted or copied `User Data` folder is
+  // read there.
+  add(currentProfileOverride())
   for (const profile of listDoubaoProfiles()) add(profile.dir)
   if (dirs.length === 0) add(findDoubaoUserDataDir())
   return dirs
@@ -482,6 +503,11 @@ export function discoverModels(now = Date.now()): DoubaoModelInfo[] | undefined 
   )
   if (usable.length === 0) return undefined
   const seenKeys = new Set(usable.map((e) => e.key))
+  // Remembered separately from `memo`: the shim's per-request lookup may run
+  // while `memo` is empty (before the first discovery, or during an
+  // invalidate), and a task-mode model absent from the static list would then
+  // silently lose its 工作任务 shape.
+  discoveredTaskIds.clear()
   const models: DoubaoModelInfo[] = usable
     // Stable order: numeric keys ascending, slugs after, so a rescan cannot
     // shuffle the picker between two identical states.
@@ -496,6 +522,7 @@ export function discoverModels(now = Date.now()): DoubaoModelInfo[] | undefined 
     .map((entry) => {
       const staticMatch = DOUBAO_MODELS.find((m) => m.id === entry.key)
       const taskMode = entry.taskOnly || isTaskModel(entry.key)
+      if (taskMode) discoveredTaskIds.add(entry.key)
       // A discovered task model has no static badge to inherit, and its name is a
       // plain product name (「GLM 5.3」, not 「工作任务 GLM 5.3」) — without this the
       // card would render it as an ordinary chat entry while it runs in task mode.
@@ -532,6 +559,7 @@ export function staticModels(): DoubaoModelInfo[] {
   return [...DOUBAO_MODELS]
 }
 
+const discoveredTaskIds = new Set<string>()
 let memo: { at: number; models: DoubaoModelInfo[] } | undefined
 let httpEntries: DiscoveredEntry[] | undefined
 let httpFetchedAt = 0
@@ -549,6 +577,31 @@ export function liveModels(now = Date.now()): DoubaoModelInfo[] {
   const models = discoverModels(now) ?? staticModels()
   memo = { at: now, models }
   return models
+}
+
+/**
+ * The catalog this process already resolved, WITHOUT re-reading anything.
+ *
+ * For callers on a request's critical path (the shim's per-request model lookup)
+ * where a 10-minute expiry must not turn into synchronous disk work: a stale
+ * answer is correct for the questions asked there, and the next refresh — from
+ * the picker, the card, or the periodic `registerModelDiscovery` callback —
+ * brings the current one. `undefined` means "never resolved yet".
+ */
+export function peekModels(): DoubaoModelInfo[] | undefined {
+  return memo?.models
+}
+
+/**
+ * Whether a model id was filed under 工作任务 by the last menu discovery.
+ *
+ * Deliberately independent of `memo`: the shim asks on the request path even
+ * when no snapshot is resolved yet, and losing this flag would route a task
+ * model through the ordinary-chat shape (wrong `conversation_mode`, no 256k
+ * limit) instead of failing visibly.
+ */
+export function isDiscoveredTaskModel(id: string): boolean {
+  return discoveredTaskIds.has(id)
 }
 
 /**

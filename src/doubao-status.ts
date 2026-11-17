@@ -26,6 +26,7 @@ import { invalidateDiscovery } from './doubao-discovery.ts'
 import type { DoubaoCatalogEntry } from './doubao-catalog.ts'
 import type { DoubaoStatsView } from './doubao-stats.ts'
 import { claimDoubaoCheckin, readDoubaoCheckin } from './doubao-checkin.ts'
+import { invalidateRenewals } from './doubao-upstream.ts'
 
 /** Route path, relative to the plugin mount point. */
 export const DOUBAO_QUOTA_PATH = '/plugins/dsh-connect-doubao-plus/quota'
@@ -554,6 +555,14 @@ function authView(): DoubaoAuthView {
  * user finishes the scan. The request is held open rather than polled so a
  * failure has exactly one place to be reported.
  */
+/**
+ * The browser-login scan currently running, if any.
+ *
+ * Module-level on purpose: the guard is about THIS process's single Chromium
+ * profile, not about one route handler instance. See the POST /auth branch.
+ */
+let loginInFlight: Promise<Awaited<ReturnType<typeof browserLogin>>> | undefined
+
 export function registerDoubaoAuthRoute(
   ctx: { webServer: WebServerLike },
   deps: { onSignedIn?: () => void } = {},
@@ -595,7 +604,19 @@ export function registerDoubaoAuthRoute(
 
       let result
       try {
-        result = await browserLogin()
+        // ONE scan at a time.
+        //
+        // `browserLogin` launches a real Chromium with a dedicated profile
+        // directory and waits up to five minutes for the QR code. A second call
+        // does not "retry the login" — it launches another browser against the
+        // SAME directory, which Chromium refuses to open (profile in use), and
+        // whichever finishes last overwrites the other's cookies. The card's
+        // button is easy to double-click and two windows are enough to trigger
+        // it, so the second caller joins the first instead of fighting it.
+        if (loginInFlight === undefined) {
+          loginInFlight = browserLogin().finally(() => { loginInFlight = undefined })
+        }
+        result = await loginInFlight
       } catch (error: unknown) {
         json(res, 200, { ...authView(), signedIn: false, detail: safeMessage(error) } satisfies DoubaoAuthView)
         return
@@ -612,6 +633,11 @@ export function registerDoubaoAuthRoute(
         // The scan may have landed on a different account than the rejected
         // session it replaces, so every derived read is stale the moment it lands.
         invalidateCredentialCache()
+        // Cookies the server rotated onto the PREVIOUS session (`msToken`,
+        // `bd_sso_hi3jfd`, …) are still in memory and would be overlaid onto
+        // this fresh header by `buildHeaders`. Dropping them is the difference
+        // between "signed in again" and "still rejected after signing in".
+        invalidateRenewals()
         invalidateQuotaCache()
         invalidateDiscovery()
         deps.onSignedIn?.()
