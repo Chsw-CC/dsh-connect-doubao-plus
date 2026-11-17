@@ -1292,6 +1292,18 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
     const markFirstToken = (): void => {
       if (firstTokenAt === null) firstTokenAt = Date.now()
     }
+    /**
+     * Whether the client has been sent anything it cannot be asked to un-see.
+     *
+     * Distinct from `firstTokenAt`, which is a latency measurement and fires on
+     * ANY non-empty delta including private reasoning. The 710020202 fallback
+     * re-issues the turn as a fresh conversation, which is only safe while the
+     * client still has nothing from this one. Reasoning does not count: it is a
+     * separate `reasoning_content` field, and under tool emulation no text is
+     * forwarded at all until the turn completes — which is exactly the setup
+     * where a stale thread used to fail the turn outright instead of retrying.
+     */
+    let visibleContentSent = false
 
     const sendRaw = (payload: unknown): void => {
       sink.write(`data: ${JSON.stringify(payload)}\n\n`)
@@ -1345,6 +1357,8 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
       onThinking: (delta: string) => {
         lifecycle.onActivity()
         if (delta !== '') markFirstToken()
+        // Deliberately does NOT set `visibleContentSent`: reasoning may be re-sent
+        // with the fallback turn without the client seeing it twice.
         if (!roleSent) {
           sendChunk({ choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })
           roleSent = true
@@ -1356,7 +1370,10 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
         // In emulated mode the fence is still forming, so nothing can be
         // forwarded live; the whole turn is parsed after it completes.
         if (emulate) return
-        if (delta !== '') markFirstToken()
+        if (delta !== '') {
+          markFirstToken()
+          visibleContentSent = true
+        }
         if (!roleSent) {
           sendChunk({ choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })
           roleSent = true
@@ -1378,7 +1395,7 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
           credentials: accounting.credentials,
         })
       } catch (error) {
-        if (!accounting.isContinuationTurn || !isInvalidParamFailure(error) || firstTokenAt !== null) throw error
+        if (!accounting.isContinuationTurn || !isInvalidParamFailure(error) || visibleContentSent) throw error
         // The remembered thread was rejected as an invalid parameter (710020202):
         // nothing was stored server-side, so the same turn is re-issued as a
         // fresh conversation instead of failing — a stale id must cost one

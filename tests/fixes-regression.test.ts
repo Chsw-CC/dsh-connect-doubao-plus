@@ -460,6 +460,100 @@ describe('model discovery and catalog completeness regressions', () => {
 })
 
 describe('conversation continuation regressions', () => {
+  /**
+   * Reasoning arrives before the rejection, and the turn must still be retried.
+   *
+   * The 710020202 fallback used to test `firstTokenAt !== null` before re-issuing.
+   * That counter fires on ANY non-empty delta, private reasoning included, so a
+   * stale thread that started thinking — which is what a thinking model does first,
+   * and what tool emulation guarantees is forwarded before any text — took the
+   * re-issue path out of play. The user saw "Doubao stream error 710020202:"
+   * instead of a silent recovery.
+   *
+   * Reasoning is not visible content: it rides a separate `reasoning_content`
+   * field, so replaying the turn does not show the client anything twice. Text is
+   * visible, and a rejection after text has gone out must NOT be retried.
+   */
+  it('still re-issues after reasoning arrived, because reasoning is not visible content', async () => {
+    const capturedBodies: Array<Record<string, any>> = []
+    const realFetch = globalThis.fetch
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL, init?: RequestInit) => {
+        const url = String(input)
+        if (url.startsWith('http://127.0.0.1:')) return realFetch(input, init)
+        if (url.includes('/quota/summary/')) {
+          return new Response(
+            JSON.stringify({ data: { window_limit_section: { usage_exhausted: false } } }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          )
+        }
+        if (url.includes('/chat/completion')) {
+          const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, any>
+          capturedBodies.push(body)
+          // Turn 2's first attempt: thinking first, THEN the rejection.
+          if (capturedBodies.length === 2) {
+            return sseResponse([
+              frame('STREAM_CHUNK', {
+                block_type: 10040,
+                block_id: 'think-1',
+                content: { thinking_block: { streaming_title: '让我想想' } },
+              }),
+              frame('STREAM_ERROR', { error_code: 710020202, error_msg: 'common invalid param' }),
+            ])
+          }
+          const conversationId = capturedBodies.length === 1 ? 'conv-stale' : 'conv-fresh'
+          return sseResponse([
+            frame('SSE_ACK', { ack_client_meta: { conversation_id: conversationId } }),
+            frame('STREAM_CHUNK', {
+              block_type: 10000,
+              block_id: 'txt-1',
+              content: { text_block: { text: '好的' } },
+            }),
+            frame('SSE_REPLY_END', {}),
+          ])
+        }
+        throw new Error(`unexpected fetch url: ${url}`)
+      }),
+    )
+
+    const shim = createDoubaoShim({ resolveCredentials: () => credentials })
+    shims.push(shim)
+    const base = await shim.baseUrl()
+    const headers = {
+      'content-type': 'application/json',
+      authorization: `Bearer ${shim.token()}`,
+    }
+
+    const res1 = await realFetch(`${base}/v1/chat/completions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ model: '3', stream: false, messages: [{ role: 'user', content: '先聊两句' }] }),
+    })
+    expect(res1.status).toBe(200)
+
+    const res2 = await realFetch(`${base}/v1/chat/completions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: '3',
+        stream: true,
+        messages: [
+          { role: 'user', content: '先聊两句' },
+          { role: 'assistant', content: '好的' },
+          { role: 'user', content: '继续' },
+        ],
+      }),
+    })
+    const text = await res2.text()
+    // The turn recovered: a third upstream call re-issued it as a fresh thread.
+    expect(capturedBodies).toHaveLength(3)
+    expect(capturedBodies[2]?.option?.need_create_conversation).toBe(true)
+    expect(capturedBodies[2]?.client_meta?.conversation_id).toBe('')
+    // And the user is told nothing about the rejection.
+    expect(text).not.toContain('710020202')
+  }),
+
   it('re-issues a rejected continuation as a fresh conversation within the same turn (710020202)', async () => {
     const capturedBodies: Array<Record<string, any>> = []
     const realFetch = globalThis.fetch
