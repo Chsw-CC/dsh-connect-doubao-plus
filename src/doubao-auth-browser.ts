@@ -45,7 +45,8 @@ export function browserProfileDir(): string {
   return join(homedir(), '.dsh', 'doubao-browser-profile')
 }
 
-const CANDIDATES = [
+/** Default Chromium installs on win32; POSIX uses {@link posixCandidates}. */
+const WINDOWS_CANDIDATES = [
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
   'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
   'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
@@ -122,7 +123,7 @@ function posixCandidates(): string[] {
 export function findBrowser(): string | undefined {
   const override = process.env.DSH_DOUBAO_CHROME
   if (override !== undefined && override !== '' && existsSync(override)) return override
-  const candidates = process.platform === 'win32' ? CANDIDATES : posixCandidates()
+  const candidates = process.platform === 'win32' ? WINDOWS_CANDIDATES : posixCandidates()
   for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate
   }
