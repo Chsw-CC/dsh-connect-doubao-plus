@@ -8,7 +8,7 @@
 > itself talks to Doubao over HTTPS with your session.
 
 [![release](https://img.shields.io/github/v/release/Chsw-CC/dsh-connect-doubao-plus)](https://github.com/Chsw-CC/dsh-connect-doubao-plus/releases)
-[![version](https://img.shields.io/badge/version-0.13.0-blue)](./CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.14.0-blue)](./CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 [![platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](#platform-support)
 [![dshfind](https://img.shields.io/badge/dshmarket-dshfind-blueviolet)](https://dshfind.dev)
@@ -62,7 +62,7 @@
 
 ```bash
 # install from the tarball (recommended)
-dsh plugin --profile desktop add "<path>/dsh-connect-doubao-plus-0.13.0.tgz"
+dsh plugin --profile desktop add "<path>/dsh-connect-doubao-plus-0.14.0.tgz"
 ```
 
 > This plugin is not on the npm registry and does not support `dsh plugin add <git url>`: `prepack` needs `npm`, while the runtime shipped with Harness only has `node`. Both the tarball and the source directory load the already-built `lib/` — no build step.
@@ -221,7 +221,7 @@ plugin marketplace and what keeps runtime types consistent.
 | Platform | Status | Session sealing |
 | --- | --- | --- |
 | **Windows x64** | ✅ **verified on real hardware** | Windows DPAPI (current-user scope) |
-| **macOS** | ✅ verified (QR sign-in + chat + activity grant, end to end) | AES-256-GCM + local 0600 key |
+| **macOS** | ✅ verified (QR sign-in + chat + activity grant + menu-driven model discovery, end to end) | AES-256-GCM + local 0600 key |
 | **Linux** | ✅ supported (same AES-256-GCM path; not exercised on hardware) | AES-256-GCM + local 0600 key |
 
 **Session** — one source only (`src/doubao-auth.ts` + `src/doubao-auth-browser.ts`):
@@ -251,6 +251,11 @@ is what was just captured, so there is no older copy to prefer.
 a time-boxed drive scan. It now feeds only the client-cache model discovery and the
 task-mode workspace; when it finds nothing the workspace falls back to a temp directory
 and chat still works.
+
+macOS lays this out differently: the data directory is `~/Library/Application Support/Doubao`
+(there is no `User Data` level) and the cookie jar is `Default/Cookies` rather than
+`Default/Network/Cookies`. Both spellings are recognised. The Linux client layout has not been
+read on real hardware, so no probing is attempted there.
 
 `node lib/cli-doctor.js --json` still reports where that directory came from
 (`credentials.data.profile`, with its source) and every candidate it saw
@@ -361,6 +366,7 @@ For **personal study and research only**.
   for the full list.
 - **Upstream PR contributors** (sources of the changes merged or queued in this fork):
   - [chenyusheng](https://github.com/chenyusheng) — [#12](https://github.com/Wahwayhale/dsh-connect-doubao/pull/12) macOS/Linux browser QR sign-in support
+  - [neu-meng](https://github.com/neu-meng) — [#21](https://github.com/Wahwayhale/dsh-connect-doubao/pull/21) macOS client-menu model discovery (data-directory probing no longer Windows-only)
   - [zuosus](https://github.com/zuosus) — [#6](https://github.com/Wahwayhale/dsh-connect-doubao/pull/6) macOS support
   - [Chsw-CC](https://github.com/Chsw-CC) — [#4](https://github.com/Wahwayhale/dsh-connect-doubao/pull/4), [#16](https://github.com/Wahwayhale/dsh-connect-doubao/pull/16) session-continuation robustness fixes (710020202)
 - **dsh-connect-workbuddy** — this plugin borrowed its **design ideas and plugin

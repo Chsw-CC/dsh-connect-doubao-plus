@@ -4,6 +4,28 @@
 
 ---
 
+## 0.14.0 — 2026-11-19
+
+> 合入社区 PR #21 的 **macOS 模型发现**：此前 macOS 上登录、对话、额度都通了，但模型清单永远回落成 6 条静态条目 —— 因为数据目录探测整段被一个 `platform !== 'win32'` 判断挡住。这一版让 macOS 也能读到客户端菜单缓存。另把两处重复的额度描述拼装收成共享函数。
+
+### 新增
+
+- **macOS 模型发现**（社区贡献，PR #21，作者 [neu-meng](https://github.com/neu-meng)）—— `listDoubaoProfiles` 不再整函数限定 Windows：真正 Windows 专属的两段（`Get-CimInstance` 探测运行中客户端、`C:\` 盘符扫描）单独加条件，darwin 走 AppData 候选路径。
+- **macOS 客户端布局**（同 PR）—— `looksLikeProfile` 增加 `Default/Cookies` 与 `Default/Preferences` 两种判定（macOS 版豆包把 cookie 库放在 `Default/Cookies`，没有 `Network` 这一层），`defaultAppDataBases` 在非 Windows 上追加 `~/Library/Application Support/Doubao`。
+- **Linux 仍然返回空**：密封与浏览器查找早已按 POSIX 实现，但没有任何一次真机验证过 Linux 版豆包的目录布局，凭空写一个没见过的路径比说「还没验证」更糟。
+
+### 重构
+
+- **额度描述去重**（`doubao-quota`）—— `doctor` 与 `probe` 各自复制了一份「已用 4% / 重置时间未知 / 开始使用后计时」的拼装逻辑，且两处措辞已经漂移。抽出 `quotaResetPhrase()` 与 `quotaAmounts()`，两个 CLI 共用同一份，行为与措辞不变。
+
+### 未采纳
+
+- **PR #22（macOS 登录钥匙串）不合并**：其 `security add-generic-password -w <blob>` 把整段密封会话放进子进程 **argv**，同机任意进程 `ps` 即可在子进程存活期间读到会话；本仓库现有的 AES-256-GCM + 0600 密钥文件路径已在实测中工作，且没有这个暴露面。
+
+### 测试
+
+- 新增 `tests/macos-support.test.ts`（14 条，社区 PR 提供）；其中密封链路与探测分支在 Windows 上按平台跳过（DPAPI 分支不写密钥文件），断言已对齐本仓库实现。
+
 ## 0.13.0 — 2026-11-18
 
 > 同步上游 0.7.2 的额度体系改动，并把豆包客户端顶部的「可用额度」汇总搬进卡片：一块只读面板就能看出**还剩多少**，而不只是百分比。

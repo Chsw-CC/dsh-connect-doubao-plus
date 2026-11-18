@@ -5,7 +5,7 @@
 > 会话只密封在本机（Windows DPAPI / 其它平台 AES-256-GCM）；Harness 到插件的流量只走 `127.0.0.1`，插件再以你的会话向豆包发起 HTTPS。
 
 [![release](https://img.shields.io/github/v/release/Chsw-CC/dsh-connect-doubao-plus)](https://github.com/Chsw-CC/dsh-connect-doubao-plus/releases)
-[![version](https://img.shields.io/badge/version-0.13.0-blue)](./CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.14.0-blue)](./CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 [![platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](#平台支持)
 [![dshfind](https://img.shields.io/badge/dshmarket-dshfind-blueviolet)](https://dshfind.dev)
@@ -58,7 +58,7 @@
 
 ```bash
 # 从 tarball 安装（推荐）
-dsh plugin --profile desktop add "<路径>/dsh-connect-doubao-plus-0.13.0.tgz"
+dsh plugin --profile desktop add "<路径>/dsh-connect-doubao-plus-0.14.0.tgz"
 ```
 
 > 本插件不走 npm registry，也不支持 `dsh plugin add <git 地址>`：`prepack` 需要 `npm`，而 Harness 自带运行时只有 `node`。tarball 与源码目录都由已构建的 `lib/` 直接加载，不需要构建步骤。
@@ -328,7 +328,7 @@ dsh plugin --profile desktop add "路径\dsh-connect-doubao-plus"
 | 平台 | 状态 | 会话密封 |
 | --- | --- | --- |
 | **Windows x64** | ✅ **实测验证** | Windows DPAPI（当前用户作用域） |
-| **macOS** | ✅ 实测验证（扫码 + 对话 + 赠送额度全链路） | AES-256-GCM + 本地 0600 密钥 |
+| **macOS** | ✅ 实测验证（扫码 + 对话 + 赠送额度 + 客户端菜单模型发现） | AES-256-GCM + 本地 0600 密钥 |
 | **Linux** | ✅ 支持（同一套 AES-256-GCM 路径，未在真机实测） | AES-256-GCM + 本地 0600 密钥 |
 
 **登录态**只有一个来源（`src/doubao-auth.ts` + `src/doubao-auth-browser.ts`）：
@@ -351,6 +351,10 @@ dsh plugin --profile desktop add "路径\dsh-connect-doubao-plus"
 配置文件里的 `profileDir` / 环境变量 `DSH_DOUBAO_PROFILE` → AppData 候选 → 运行中客户端的
 `--user-data-dir` → 限时扫盘。它现在只用于模型清单的客户端缓存与「工作任务」模式的本地工作区；
 命中不到时工作区退回临时目录，仍然可以对话。
+
+macOS 的布局与 Windows 不同：数据目录在 `~/Library/Application Support/Doubao`（没有 `User Data`
+这一层），cookie 库在 `Default/Cookies` 而不是 `Default/Network/Cookies`。这两处都已识别；
+Linux 版客户端的目录布局没有实测过，故 Linux 上仍不做探测。
 
 ---
 
@@ -411,7 +415,8 @@ npm run check       # 以上全部
 4. **豆包客户端不需要安装。** 登录态只来自浏览器扫码；会话在 Windows 上用 DPAPI、
    macOS / Linux 上用 AES-256-GCM 密封。数据目录只在两处还会被读到 ——
    模型清单缓存与「工作任务」模式的本地工作区 —— 自动探测几层（配置文件里的 `profileDir`、
-   环境变量 `DSH_DOUBAO_PROFILE`、AppData 候选、运行中客户端的 `--user-data-dir`、限时扫盘）；
+   环境变量 `DSH_DOUBAO_PROFILE`、AppData 候选、运行中客户端的 `--user-data-dir`、限时扫盘；
+   macOS 上另有 `~/Library/Application Support/Doubao`）；
    全落空时工作区退回临时目录，**不再影响登录**。
 5. **风控滑块无法自动处理。** 触发后需在弹出的登录窗口里手动完成验证，再点一次「重新登录」。
 6. **图片输入未提供。** 本 provider 只发送文本块，不转发图片。
@@ -467,6 +472,7 @@ npm run check       # 以上全部
   [contributors](https://github.com/Wahwayhale/dsh-connect-doubao/graphs/contributors)。
 - **上游 PR 贡献者**（本 fork 已合并/待合并的改动来源）：
   - [chenyusheng](https://github.com/chenyusheng) — [#12](https://github.com/Wahwayhale/dsh-connect-doubao/pull/12) macOS/Linux 浏览器扫码登录支持
+- [neu-meng](https://github.com/neu-meng) — [#21](https://github.com/Wahwayhale/dsh-connect-doubao/pull/21) macOS 客户端菜单模型发现（数据目录探测不再限定 Windows）
   - [zuosus](https://github.com/zuosus) — [#6](https://github.com/Wahwayhale/dsh-connect-doubao/pull/6) macOS 支持
   - [Chsw-CC](https://github.com/Chsw-CC) — [#4](https://github.com/Wahwayhale/dsh-connect-doubao/pull/4)、[#16](https://github.com/Wahwayhale/dsh-connect-doubao/pull/16) 会话续传健壮性修复（710020202）
 - **dsh-connect-workbuddy** —— 本插件在**设计思路与插件结构**上借鉴了它的做法
