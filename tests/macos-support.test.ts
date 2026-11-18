@@ -64,8 +64,13 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true })
 })
 
+// The AES-256-GCM seal path only runs off Windows: on win32 `sealBlob` goes
+// through DPAPI, which needs a live master key and writes no key file. The
+// platform-specific half is therefore skipped there, not faked.
+const offWindows = process.platform === 'win32' ? it.skip : it
+
 describe('session sealing off Windows', () => {
-  it('round-trips the session through save/load', () => {
+  offWindows('round-trips the session through save/load', () => {
     saveBrowserCredentials(ALL_COOKIES)
     const loaded = loadBrowserCredentials()
     expect(loaded?.ok).toBe(true)
@@ -73,13 +78,13 @@ describe('session sealing off Windows', () => {
     expect(loaded?.header).toContain('sessionid=sid-value')
   })
 
-  it('writes a 32-byte key with owner-only permissions', () => {
+  offWindows('writes a 32-byte key with owner-only permissions', () => {
     saveBrowserCredentials(ALL_COOKIES)
     const keyPath = join(home, '.dsh', 'doubao-credentials.key')
     expect(readFileSync(keyPath).length).toBe(32)
   })
 
-  it('rejects a tampered blob instead of yielding garbage', () => {
+  offWindows('rejects a tampered blob instead of yielding garbage', () => {
     saveBrowserCredentials(ALL_COOKIES)
     const cachePath = join(home, '.dsh', 'doubao-credentials-browser.dpapi')
     const sealed = readFileSync(cachePath)
@@ -88,7 +93,7 @@ describe('session sealing off Windows', () => {
     expect(loadBrowserCredentials()).toBeUndefined()
   })
 
-  it('rejects a blob whose magic is not ours', () => {
+  offWindows('rejects a blob whose magic is not ours', () => {
     saveBrowserCredentials(ALL_COOKIES)
     const cachePath = join(home, '.dsh', 'doubao-credentials-browser.dpapi')
     const sealed = readFileSync(cachePath)
@@ -122,7 +127,10 @@ describe('browser lookup off Windows', () => {
   })
 
   it('signals instead of calling taskkill off Windows', () => {
-    expect(authBrowserSource).toContain("if (process.platform !== 'win32')")
+    // This fork guards win32 first and returns, so the POSIX branch is the
+    // fall-through. What matters is that taskkill stays Windows-only and that
+    // the non-Windows path really does signal the child.
+    expect(authBrowserSource).toContain("spawnSync('taskkill'")
     expect(authBrowserSource).toContain("child.kill('SIGTERM')")
   })
 })
@@ -154,7 +162,7 @@ describe('profile discovery off Windows', () => {
     expect(found[0]?.dir).toBe(dir)
   })
 
-  it('does not run the PowerShell probe or drive scan off Windows', () => {
+  offWindows('does not run the PowerShell probe or drive scan off Windows', () => {
     const probed: string[] = []
     const found = listDoubaoProfiles({
       platform: 'darwin',
