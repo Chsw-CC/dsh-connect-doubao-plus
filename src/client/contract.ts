@@ -19,7 +19,7 @@ export const DOUBAO_QUOTA_PATH = '/plugins/dsh-connect-doubao-plus/quota'
 export const DOUBAO_CHECKIN_PATH = '/plugins/dsh-connect-doubao-plus/checkin'
 
 /** What the check-in call can report. Mirrors the host's own union exactly. */
-export type DoubaoCheckinOutcome = 'claimed' | 'already' | 'needs_login' | 'no_task' | 'failed'
+export type DoubaoCheckinOutcome = 'claimed' | 'already' | 'ready' | 'needs_login' | 'no_task' | 'inactive' | 'failed'
 
 /**
  * The check-in payload `GET|POST {DOUBAO_CHECKIN_PATH}` returns.

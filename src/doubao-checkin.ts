@@ -26,10 +26,27 @@
  *
  * @module dsh-connect-doubao-plus/checkin
  */
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { loadDoubaoCredentials } from './doubao-auth.ts'
 import { buildHeaders } from './doubao-upstream.ts'
 
 export const CHECKIN_ORIGIN = 'https://www.doubao.com'
+
+/** Name of the file under `~/.dsh` that remembers the last claim outcome. */
+const CHECKIN_STATE_FILENAME = 'dsh-connect-doubao.checkin.json'
+
+/** Every outcome the card and the scheduler understand; a state file gate. */
+const CHECKIN_OUTCOMES: ReadonlySet<string> = new Set<string>([
+  'claimed',
+  'already',
+  'ready',
+  'needs_login',
+  'no_task',
+  'inactive',
+  'failed',
+])
 
 /** Panel read: today's state, the streak and the lifetime total. */
 export const CHECKIN_DETAIL_ENDPOINT = `${CHECKIN_ORIGIN}/alice/ug/campaign/v3/detail/`
@@ -69,6 +86,16 @@ export const CHECKIN_TICK_MS = 10 * 60 * 1000
 
 /** First look after startup, in ms, so a host booted at noon still claims today. */
 export const CHECKIN_FIRST_TICK_MS = 45 * 1000
+
+/**
+ * How long a refused claim is left alone, in ms.
+ *
+ * `channel-pack` throttles a repeated check-in the same way (TRAE answers 9074
+ * with a 300s cooldown, the shared scheduler retries no sooner than an hour).
+ * The point is not patience -- it is that hammering an endpoint which has
+ * already answered "no" cannot change the answer and does bury the log.
+ */
+export const CHECKIN_REFUSED_COOLDOWN_MS = 60 * 60 * 1000
 
 /**
  * Non-secret PC-web activity identity.
@@ -114,10 +141,26 @@ export type DoubaoCheckinOutcome =
   | 'claimed'
   /** Already claimed today -- by the user, an earlier attempt, or the scheduler. */
   | 'already'
+  /**
+   * The panel answered and today's grant is still unclaimed: the ordinary state
+   * of a working account at the start of a day. Distinct from 'failed', which is
+   * why the card used to show an error before the user had done anything wrong.
+   */
+  | 'ready'
   /** The session is gone. Only a fresh QR sign-in fixes it; retrying cannot. */
   | 'needs_login'
   /** Signed in, but this account has no check-in activity (work / Feishu account). */
   | 'no_task'
+  /**
+   * Signed in to a real account, but nothing claimable RIGHT NOW: the panel shows
+   * the daily task standing open while the claim endpoint refuses it.
+   *
+   * This is a normal terminal state, not a fault -- compare `channel-pack`'s
+   * LobsterAI (slotState) and Qoder (claimableCampaigns), which both report
+   * "nothing to claim" as `inactive` and never as a failure. Retrying inside the
+   * hour is pointless, so the scheduler leaves it settled.
+   */
+  | 'inactive'
   /** Not claimable right now, or anything else went wrong. */
   | 'failed'
 
@@ -141,6 +184,13 @@ export interface DoubaoCheckinView {
   fetchedAt: number
   /** Short non-secret reason for `failed` / `needs_login`, else null. */
   error: string | null
+  /**
+   * Epoch ms before which a `failed` claim must not be retried, else null.
+   *
+   * A transport blip deserves an immediate retry; a refusal repeated eight times
+   * does not. Without this the hourly sweep re-asks the same closed door forever.
+   */
+  retryAfter: number | null
 }
 
 /* ------------------------------------------------------------------ *
@@ -198,7 +248,7 @@ type CampaignReply =
   /** Missing credentials, code 710012001, or HTTP 401/403: one fix, one message. */
   | { kind: 'needs_login'; error: string }
   /** The cookie works but the account has no such activity. */
-  | { kind: 'no_task'; error: string }
+  | { kind: 'no_task'; error: string; code: number }
   | { kind: 'failed'; error: string }
 
 /**
@@ -262,7 +312,7 @@ async function postCampaign(
     return { kind: 'needs_login', error: '豆包登录已过期，请重新扫码登录一次' }
   }
   if (code === CODE_NO_ACTIVITY) {
-    return { kind: 'no_task', error: '这个豆包账号没有每日签到活动（企业 / 飞书账号没有这个玩法）' }
+    return { kind: 'no_task', code: CODE_NO_ACTIVITY, error: '这个豆包账号没有每日签到活动（企业 / 飞书账号没有这个玩法）' }
   }
   if (code !== 0) {
     const hint = textOf(envelope.msg) ?? textOf(envelope.message) ?? ''
@@ -408,7 +458,7 @@ function view(
   extra: Partial<DoubaoCheckinView> = {},
 ): DoubaoCheckinView {
   return {
-    ok: outcome === 'claimed' || outcome === 'already',
+    ok: outcome === 'claimed' || outcome === 'already' || outcome === 'ready',
     outcome,
     continuousDays: null,
     checkedInToday: null,
@@ -418,6 +468,7 @@ function view(
     day,
     fetchedAt: Date.now(),
     error: null,
+    retryAfter: null,
     ...extra,
   }
 }
@@ -456,7 +507,7 @@ export async function readDoubaoCheckin(
       const reward = rewardOf(daily)
       const checkedInToday = daily.checked_in_today === true
       const progress = reply.body.progress
-      return view(checkedInToday ? 'already' : 'failed', day, {
+      return view(checkedInToday ? 'already' : 'ready', day, {
         continuousDays: numberOf(daily.continuous_days),
         checkedInToday,
         rewardAmount: reward.amount,
@@ -464,7 +515,7 @@ export async function readDoubaoCheckin(
         totalAmount: numberOf(progress !== null && typeof progress === 'object' ? (progress as { total_amount?: unknown }).total_amount : undefined),
         // "Not claimed yet" is not a failure: the panel simply has nothing to
         // report until the button (or the scheduler) fires.
-        error: checkedInToday ? null : '今日还未领取',
+        error: null,
       })
     }
     return view('no_task', day, { error: lastNoTask ?? noActivityError(lastBody) })
@@ -492,11 +543,37 @@ export async function readDoubaoCheckin(
  * lifetime total) and its failure must not turn a successful claim into an
  * error.
  */
-export async function claimDoubaoCheckin(): Promise<DoubaoCheckinView> {
+export async function claimDoubaoCheckin(
+  options: { force?: boolean } = {},
+): Promise<DoubaoCheckinView> {
   const day = beijingDayKey()
+
+  // A cooldown survives the process that learned it. Without this read the whole
+  // cooldown lasted only as long as the in-memory scheduler, so a restart (or a
+  // button press, which does not go through the scheduler at all) re-asked the
+  // same closed door immediately -- which is exactly the stampede it exists to
+  // stop.
+  const remembered = options.force === true ? undefined : readCheckinState()
+  if (
+    remembered !== undefined &&
+    remembered.day === day &&
+    remembered.outcome === 'inactive' &&
+    remembered.retryAfter !== null &&
+    Date.now() < remembered.retryAfter
+  ) {
+    return view('inactive', day, {
+      checkedInToday: remembered.checkedInToday,
+      continuousDays: remembered.continuousDays,
+      rewardAmount: remembered.rewardAmount,
+      retryAfter: remembered.retryAfter,
+      error: remembered.error === null ? null : `${remembered.error}（冷却中，稍后自动重试）`,
+    })
+  }
+
   const order = [campaignGroup, ...CHECKIN_CAMPAIGN_GROUPS.filter((group) => group !== campaignGroup)]
   let reply: CampaignReply | undefined
   let lastNoTask: string | undefined
+  let lastNoTaskCode: number | undefined
   for (const group of order) {
     // Sending the group under both names costs nothing and survives the case
     // where upstream moved the claim from `scene` to `campaign_group_code`.
@@ -505,14 +582,51 @@ export async function claimDoubaoCheckin(): Promise<DoubaoCheckinView> {
       campaign_group_code: group,
     })
     if (attempt.kind === 'needs_login') return view('needs_login', day, { error: attempt.error })
-    if (attempt.kind === 'no_task') { lastNoTask = attempt.error; continue }
+    if (attempt.kind === 'no_task') {
+      lastNoTask = attempt.error
+      lastNoTaskCode = attempt.code
+      continue
+    }
     if (attempt.kind === 'failed') return view('failed', day, { error: attempt.error })
     campaignGroup = group
     reply = attempt
     break
   }
   if (reply === undefined || reply.kind !== 'json') {
-    return view('no_task', day, { error: lastNoTask ?? '豆包账号里没有「每日签到」任务' })
+    // The claim was refused. Before calling that "no activity", check what the
+    // PANEL says: measured 2026-11-18, the claim endpoint answered 710010702
+    // ("系统错误") while the detail endpoint still reported a live daily task,
+    // a 27-day streak and 200 waiting. Reporting "no activity" there is a
+    // fabrication that sends the user looking for the wrong fix -- so only say
+    // it when the panel actually agrees there is nothing to claim.
+    const panel = await readDoubaoCheckin({ force: true })
+      .then((fresh) => (fresh.outcome === 'ready' || fresh.outcome === 'already' ? fresh : undefined))
+      .catch(() => undefined)
+    if (panel === undefined) {
+      return view('no_task', day, { error: lastNoTask ?? '豆包账号里没有「每日签到」任务' })
+    }
+    // The panel says the task is standing and unclaimed; the claim endpoint
+    // still refuses. Measured 2026-11-18: 710010702 for every scene spelling, every
+    // body shape, with and without an `a_bogus` page signature, eight retries in a
+    // row. Reporting that as `failed` is what made the card retry a closed door
+    // every ten minutes -- so it is `inactive`, terminal for the day, with the
+    // refusal reason kept for the user to read.
+    const refused = view('inactive', day, {
+      checkedInToday: false,
+      retryAfter: Date.now() + CHECKIN_REFUSED_COOLDOWN_MS,
+      error: `签到接口拒绝了这次领取（code ${String(lastNoTaskCode ?? CODE_NO_ACTIVITY)}），但面板显示任务仍在、今天尚未领取。不是账号没有活动，是上游这一步没放行。`,
+    })
+    writeCheckinState({
+      day,
+      outcome: refused.outcome,
+      checkedInToday: refused.checkedInToday,
+      continuousDays: refused.continuousDays,
+      rewardAmount: refused.rewardAmount,
+      retryAfter: refused.retryAfter,
+      error: refused.error,
+      at: Date.now(),
+    })
+    return refused
   }
 
   const outcome: DoubaoCheckinOutcome = reply.body.idempotent === true ? 'already' : 'claimed'
@@ -531,7 +645,92 @@ export async function claimDoubaoCheckin(): Promise<DoubaoCheckinView> {
   })
   cached = result
   if (result.ok) claimedDay = day
+  // The card is often closed right after a claim, so the answer the user wants
+  // tomorrow ("did it land, and what did it give?") is written where a restart
+  // can still find it. Best effort: a read-only home must not fail the claim.
+  writeCheckinState({
+    day,
+    outcome: result.outcome,
+    checkedInToday: result.checkedInToday,
+    continuousDays: result.continuousDays,
+    rewardAmount: result.rewardAmount,
+    retryAfter: result.retryAfter,
+    error: result.error,
+    at: Date.now(),
+  })
   return result
+}
+
+/* ------------------------------------------------------------------ *
+ * Persisted last result
+ * ------------------------------------------------------------------ */
+
+/** Where the last claim result is remembered across host restarts. */
+export function checkinStateFilePath(): string {
+  // Overridable so the test suite never reads or writes the real cache: a
+  // cooldown leaked from one test run would otherwise silence the next one,
+  // and a test run would otherwise silence the card.
+  const override = process.env.DSH_DOUBAO_CHECKIN_STATE
+  if (typeof override === 'string' && override !== '') return override
+  return join(homedir(), '.dsh', CHECKIN_STATE_FILENAME)
+}
+
+/** What survives a restart: the day, its outcome and the refusal cooldown. */
+export interface DoubaoCheckinState {
+  day: string
+  outcome: DoubaoCheckinOutcome
+  checkedInToday: boolean | null
+  continuousDays: number | null
+  rewardAmount: number | null
+  retryAfter: number | null
+  error: string | null
+  at: number
+}
+
+/**
+ * Read the remembered state, or undefined.
+ *
+ * Never throws: this file is a convenience, and a plugin that failed to load its
+ * card because a cache was half-written would be trading a bonus for the product.
+ */
+export function readCheckinState(): DoubaoCheckinState | undefined {
+  try {
+    const raw = readFileSync(checkinStateFilePath(), 'utf-8')
+    const parsed = JSON.parse(raw) as Partial<DoubaoCheckinState>
+    if (typeof parsed.day !== 'string' || typeof parsed.outcome !== 'string') return undefined
+    const outcome = parsed.outcome as DoubaoCheckinOutcome
+    if (!CHECKIN_OUTCOMES.has(outcome)) return undefined
+    return {
+      day: parsed.day,
+      outcome,
+      checkedInToday: typeof parsed.checkedInToday === 'boolean' ? parsed.checkedInToday : null,
+      continuousDays: numberOf(parsed.continuousDays),
+      rewardAmount: numberOf(parsed.rewardAmount),
+      retryAfter: numberOf(parsed.retryAfter),
+      error: typeof parsed.error === 'string' ? parsed.error.slice(0, 200) : null,
+      at: numberOf(parsed.at) ?? 0,
+    }
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Remember today's outcome.
+ *
+ * Atomic (write-temp-then-rename) for the same reason the settings file is: the
+ * host may be killed mid-write, and a truncated JSON cache must never be the
+ * thing that decides whether a claim runs.
+ */
+export function writeCheckinState(state: DoubaoCheckinState): void {
+  const path = checkinStateFilePath()
+  try {
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(`${path}.tmp`, JSON.stringify(state, null, 2), 'utf-8')
+    renameSync(`${path}.tmp`, path)
+  } catch {
+    // Best effort: the in-memory cooldown still holds for this process.
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -543,25 +742,35 @@ export interface DoubaoAutoCheckinHandle {
   stop(): void
   /** Run one sweep now, regardless of the tick. Returns null when skipped. */
   runNow(): Promise<DoubaoCheckinView | null>
+  /** The last view the sweep produced, or undefined before the first one. */
+  last(): DoubaoCheckinView | undefined
 }
 
 /**
  * Claim once per Beijing day, while enabled.
  *
- * The scheduler keeps NO on-disk "done today" flag, on purpose: the panel itself
- * says whether today is claimed, so a restart mid-day simply looks again and
- * finds either a job to do or `already`. Persisting the flag would add a second
- * source of truth that is wrong in exactly the case that matters -- a day having
- * rolled over while the host was off.
+ * The scheduler keeps no in-memory "done today" flag across restarts, on
+ * purpose: the panel itself says whether today is claimed, so a restart
+ * mid-day simply looks again and finds either a job to do or `already`. A
+ * persisted flag would be wrong in exactly the case that matters -- a day
+ * having rolled over while the host was off.
  *
  * Skips are outcomes, not silence:
- *   - disabled       -> no request at all
- *   - settled today  -> claimed / already / needs_login / no_task are not retried
- *   - failed         -> RETRIED on the next tick, because that is usually transient
+ *   - disabled        -> no request at all
+ *   - settled today   -> claimed / already / no_task are not retried
+ *   - cooling down    -> inactive is not retried until its cooldown expires
+ *   - failed, needs_login -> retried on the next tick
  *
- * `needs_login` is deliberately settled: no amount of retrying mints a session,
- * and an hourly failure would only bury the one message that tells the user what
- * to do.
+ * `inactive` earns a cooldown rather than a plain settle because the answer is
+ * not about this process: measured 2026-11-18, the claim endpoint refused while
+ * the panel still offered the task. Re-asking every ten minutes cannot change
+ * that and does bury the log, so it waits out {@link CHECKIN_REFUSED_COOLDOWN_MS}.
+ *
+ * `needs_login` is retried, unlike an earlier version that settled it: a stale
+ * session and a refused claim look alike from here, and the user may well have
+ * scanned the QR since the last tick. The retry is cheap -- the call fails
+ * immediately -- and a permanently missing session is still reported by every
+ * attempt to the card.
  */
 export function startDoubaoAutoCheckin(deps: {
   enabled: () => boolean
@@ -572,6 +781,9 @@ export function startDoubaoAutoCheckin(deps: {
   const tickMs = deps.tickMs ?? CHECKIN_TICK_MS
   const firstTickMs = deps.firstTickMs ?? CHECKIN_FIRST_TICK_MS
   let settledDay: string | undefined
+  /** A refused claim answers nothing new until this instant. */
+  let retryAfter: number | undefined
+  let lastView: DoubaoCheckinView | undefined
   let stopped = false
   let timer: ReturnType<typeof setTimeout> | undefined
 
@@ -580,14 +792,25 @@ export function startDoubaoAutoCheckin(deps: {
     if (!deps.enabled()) return null
     const day = beijingDayKey()
     if (settledDay === day) return null
+    // A refused claim is settled for its cooldown: re-asking inside the hour only
+    // burns a request and rewrites the same log line.
+    if (retryAfter !== undefined && Date.now() < retryAfter) return null
 
     const result = await claimDoubaoCheckin().catch(
       () => view('failed', day, { error: 'claim threw' }),
     )
+    lastView = result
     deps.onResult?.(result)
-    // 'failed' stays unsettled on purpose: a transport blip must not cost the
-    // day's grant, so the next tick tries again.
-    if (result.outcome !== 'failed') settledDay = day
+    // Retried outcomes are exactly those that might answer differently next time:
+    // a transport blip ('failed') and an expired session ('needs_login', where the
+    // user may have scanned the QR since). 'inactive' is upstream saying no.
+    if (result.outcome === 'failed') return result
+    if (result.outcome === 'needs_login') return result
+    if (result.outcome === 'inactive') {
+      retryAfter = result.retryAfter ?? Date.now() + CHECKIN_REFUSED_COOLDOWN_MS
+      return result
+    }
+    settledDay = day
     return result
   }
 
@@ -607,5 +830,6 @@ export function startDoubaoAutoCheckin(deps: {
       timer = undefined
     },
     runNow: sweep,
+    last: () => lastView,
   }
 }

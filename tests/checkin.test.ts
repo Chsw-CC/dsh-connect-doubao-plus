@@ -6,6 +6,8 @@
  * "this account has no activity", and a scheduler must not retry a dead session
  * into a loop. None of that is visible in a happy-path test.
  */
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
@@ -70,6 +72,10 @@ let calls: string[]
 
 beforeEach(() => {
   calls = []
+  // Point the cooldown cache at a path that cannot exist yet, so a run never reads
+  // a stale refusal (and never writes one the next run would honour). Without this
+  // the suite is order-dependent on this machine and green only on a clean one.
+  process.env.DSH_DOUBAO_CHECKIN_STATE = join(tmpdir(), `dsh-checkin-test-${String(process.pid)}-${String(Date.now())}-${Math.random().toString(16).slice(2)}.json`)
   invalidateCheckinCache()
 })
 
@@ -105,13 +111,14 @@ describe('readDoubaoCheckin', () => {
     expect(calls[0]).not.toContain('582478')
   })
 
-  it('reports an unclaimed day without calling the claim endpoint', async () => {
+  it('reports an unclaimed day as ready, not as a failure', async () => {
     const fetchMock = vi.fn(async () => jsonResponse(panelBody({ checked: false })))
     vi.stubGlobal('fetch', fetchMock)
     const view = await readDoubaoCheckin({ force: true })
-    expect(view.outcome).toBe('failed')
+    expect(view.outcome).toBe('ready')
+    expect(view.ok).toBe(true)
     expect(view.checkedInToday).toBe(false)
-    expect(view.error).toBe('今日还未领取')
+    expect(view.error).toBeNull()
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(calls.some((url) => url.includes('landing/checkin'))).toBe(false)
   })
@@ -293,5 +300,83 @@ describe('startDoubaoAutoCheckin', () => {
     handle.stop()
     expect(seen).toEqual(['claimed'])
     expect(second).toBeNull()
+  })
+})
+
+describe('refused claim', () => {
+  it('reports inactive, not a fabricated "no activity", while the panel still offers the task', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+      if (String(input).includes('landing/checkin')) return jsonResponse({ code: 710010702 })
+      return jsonResponse(panelBody({ checked: false }))
+    }))
+    const view = await claimDoubaoCheckin()
+    expect(view.outcome).toBe('inactive')
+    expect(view.ok).toBe(false)
+    // The panel said the task is standing, so the reason must be the refusal --
+    // never "this account has no daily check-in".
+    expect(view.error).not.toContain('没有每日签到活动')
+    expect(view.error).toContain('710010702')
+    expect(view.retryAfter).toBeGreaterThan(Date.now())
+  })
+
+  it('still says no_task when the panel agrees there is nothing to claim', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+      if (String(input).includes('landing/checkin')) return jsonResponse({ code: 710010702 })
+      return jsonResponse({ code: 0, data: { tasks: [{ task_kind: 'c2b_guide' }] } })
+    }))
+    const view = await claimDoubaoCheckin()
+    expect(view.outcome).toBe('no_task')
+  })
+
+  it('stays settled while the refusal cooldown is running', async () => {
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      if (String(input).includes('landing/checkin')) return jsonResponse({ code: 710010702 })
+      return jsonResponse(panelBody({ checked: false }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const handle = startDoubaoAutoCheckin({ enabled: () => true, tickMs: 10, firstTickMs: 0 })
+    const first = await handle.runNow()
+    expect(first?.outcome).toBe('inactive')
+    const callsAfterFirst = fetchMock.mock.calls.length
+    const second = await handle.runNow()
+    handle.stop()
+    expect(second).toBeNull()
+    expect(fetchMock.mock.calls.length).toBe(callsAfterFirst)
+  })
+  it('honours a cooldown another process wrote down', async () => {
+    // First claim: refused, and the reason is remembered on disk.
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+      if (String(input).includes('landing/checkin')) return jsonResponse({ code: 710010702 })
+      return jsonResponse(panelBody({ checked: false }))
+    }))
+    const first = await claimDoubaoCheckin()
+    expect(first.outcome).toBe('inactive')
+
+    // A fresh cache stands in for a restart: nothing in memory is left, and the
+    // card must still not re-ask a door that closed a minute ago.
+    invalidateCheckinCache()
+    const fetchMock = vi.fn(async () => jsonResponse(panelBody({ checked: false })))
+    vi.stubGlobal('fetch', fetchMock)
+    const second = await claimDoubaoCheckin()
+    expect(second.outcome).toBe('inactive')
+    expect(second.retryAfter).toBe(first.retryAfter)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('re-asks when forced past the cooldown', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+      if (String(input).includes('landing/checkin')) return jsonResponse({ code: 710010702 })
+      return jsonResponse(panelBody({ checked: false }))
+    }))
+    await claimDoubaoCheckin()
+    invalidateCheckinCache()
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      if (String(input).includes('landing/checkin')) return jsonResponse({ code: 710010702 })
+      return jsonResponse(panelBody({ checked: false }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const forced = await claimDoubaoCheckin({ force: true })
+    expect(forced.outcome).toBe('inactive')
+    expect(fetchMock).toHaveBeenCalled()
   })
 })

@@ -5,6 +5,7 @@
  *   node lib/cli-checkin.js
  *   node lib/cli-checkin.js --json
  *   node lib/cli-checkin.js --claim   # opt-in: actually claims today's grant
+ *   node lib/cli-checkin.js --claim --force  # ignore a running refusal cooldown
  *
  * Read-only by default. This exists because "check-in doesn't work" has several
  * indistinguishable shapes from inside the card -- dead session, retired
@@ -46,9 +47,12 @@ async function main(): Promise<void> {
   const argv = process.argv.slice(2)
   const asJson = argv.includes('--json')
   const doClaim = argv.includes('--claim')
+  // `--force` re-asks upstream even while the refusal cooldown is running. Only the
+  // CLI has it: the card must not offer a button that hammering cannot help.
+  const force = argv.includes('--force')
 
   const read = await readDoubaoCheckin({ force: true })
-  const claimed = doClaim ? await claimDoubaoCheckin() : undefined
+  const claimed = doClaim ? await claimDoubaoCheckin({ force }) : undefined
 
   if (asJson) {
     process.stdout.write(`${JSON.stringify({ read: summary(read), claim: claimed === undefined ? null : summary(claimed) }, null, 2)}\n`)
