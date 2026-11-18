@@ -74,6 +74,7 @@ export default [
       bin: 'src/bin.ts',
       'cli-probe': 'src/cli-probe.ts',
       'cli-doctor': 'src/cli-doctor.ts',
+      'cli-checkin': 'src/cli-checkin.ts',
     },
     outDir: 'lib',
     format: ['esm'],

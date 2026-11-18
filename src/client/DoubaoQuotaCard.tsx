@@ -1101,7 +1101,11 @@ export function DoubaoQuotaCard(props: DoubaoCardProps): ReactElement {
                     ? t('checkin.needsLogin')
                     : checkin?.outcome === 'no_task'
                       ? t('checkin.noTask')
-                      : '今日还未领取'}
+                      : checkin?.outcome === 'ready'
+                        ? t('checkin.ready')
+                        : checkin?.outcome === 'inactive'
+                          ? t('checkin.inactive')
+                          : '—'}
             </span>
             <button
               type="button"
