@@ -25,7 +25,7 @@ import {
   PROFILE_ENV,
 } from './doubao-auth.ts'
 import { probeAccount, classifyDoubaoFailure, DoubaoUpstreamError } from './doubao-upstream.ts'
-import { fetchQuota, findWindow, formatDuration, millisUntilReset } from './doubao-quota.ts'
+import { fetchQuota, findWindow, formatDuration, millisUntilReset, quotaAmounts, quotaResetPhrase } from './doubao-quota.ts'
 import { createDoubaoShim } from './doubao-shim.ts'
 import { createDoubaoAdapter } from './doubao-adapter.ts'
 import {
@@ -172,21 +172,11 @@ export async function runDoctor(): Promise<DoctorReport> {
     const quota = await fetchQuota({ force: true })
     const describeWindow = (window: ReturnType<typeof findWindow>): string => {
       if (window === undefined) return 'not offered'
-      if (window.startsOnUse === true && window.resetUnknown === true) {
-        return `${window.usedPercent}% used, starts counting on first use`
-      }
-      if (window.resetUnknown === true) {
-        return `${window.usedPercent}% used, reset time unknown`
-      }
-      return `${window.usedPercent}% used, ${formatDuration(millisUntilReset(window))} to reset`
+      return `${window.usedPercent}% used, ${quotaResetPhrase(window)}`
     }
     const describeGrant = (window: ReturnType<typeof findWindow>): string => {
       if (window === undefined) return 'none'
-      const amounts =
-        window.usedAmount !== undefined && window.totalAmount !== undefined
-          ? `${window.usedAmount}/${window.totalAmount}`
-          : `${window.usedPercent}%`
-      return `${window.label ?? 'bonus'} ${amounts}, ${formatDuration(millisUntilReset(window))} to expiry`
+      return `${window.label ?? 'bonus'} ${quotaAmounts(window)}, ${formatDuration(millisUntilReset(window))} to expiry`
     }
     const monthly = findWindow(quota, 'monthly')
     const grant = findWindow(quota, 'incentive')

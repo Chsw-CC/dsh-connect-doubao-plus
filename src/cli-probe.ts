@@ -15,7 +15,7 @@
  */
 import { loadDoubaoCredentials } from './doubao-auth.ts'
 import { streamChat, probeAccount, DoubaoUpstreamError } from './doubao-upstream.ts'
-import { fetchQuota, findWindow, millisUntilReset, formatDuration } from './doubao-quota.ts'
+import { fetchQuota, findWindow, millisUntilReset, formatDuration, quotaAmounts, quotaResetPhrase } from './doubao-quota.ts'
 import { DOUBAO_MODELS, findDoubaoModel, findReasoningLevel } from './doubao-catalog.ts'
 
 interface Options {
@@ -93,21 +93,11 @@ async function main(): Promise<number> {
   const quota = await fetchQuota({ force: true })
   const describeWindow = (window: ReturnType<typeof findWindow>): string => {
     if (window === undefined) return 'not offered by this plan'
-    if (window.startsOnUse === true && window.resetUnknown === true) {
-      return `${window.usedPercent}% used, starts counting on first use`
-    }
-    if (window.resetUnknown === true) {
-      return `${window.usedPercent}% used, reset time unknown`
-    }
-    return `${window.usedPercent}% used, ${formatDuration(millisUntilReset(window))} to reset`
+    return `${window.usedPercent}% used, ${quotaResetPhrase(window)}`
   }
   const describeGrant = (window: ReturnType<typeof findWindow>): string => {
     if (window === undefined) return 'none'
-    const amounts =
-      window.usedAmount !== undefined && window.totalAmount !== undefined
-        ? `${window.usedAmount} / ${window.totalAmount}`
-        : `${window.usedPercent}%`
-    return `${window.label ?? 'bonus'}: ${amounts} used, ${formatDuration(millisUntilReset(window))} to expiry`
+    return `${window.label ?? 'bonus'}: ${quotaAmounts(window, ' / ')} used, ${formatDuration(millisUntilReset(window))} to expiry`
   }
   const monthly = findWindow(quota, 'monthly')
   const grant = findWindow(quota, 'incentive')

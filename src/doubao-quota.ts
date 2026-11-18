@@ -392,6 +392,28 @@ export function invalidateQuotaCache(): void {
 }
 
 /** Convenience lookup for a specific window. */
+/**
+ * The amount string for one window: `449/9,000` when the server reports raw
+ * amounts, otherwise the percentage. Shared by the card-adjacent CLI checks so
+ * the two never disagree on which of the two shapes wins.
+ */
+export function quotaAmounts(window: QuotaWindow, separator = '/'): string {
+  return window.usedAmount !== undefined && window.totalAmount !== undefined
+    ? `${window.usedAmount}${separator}${window.totalAmount}`
+    : `${window.usedPercent}%`
+}
+
+/**
+ * The reset half of a quota line: the phrase is the same everywhere, so it is
+ * built once here rather than copied into each CLI.
+ */
+export function quotaResetPhrase(window: QuotaWindow): string {
+  if (window.resetUnknown === true) {
+    return window.startsOnUse === true ? 'starts counting on first use' : 'reset time unknown'
+  }
+  return `${formatDuration(millisUntilReset(window))} to reset`
+}
+
 export function findWindow(quota: DoubaoQuota, type: QuotaWindowType): QuotaWindow | undefined {
   return quota.windows.find((window) => window.type === type)
 }
