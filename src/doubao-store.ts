@@ -92,7 +92,7 @@ export function readStoredSettings(path: string = settingsFilePath()): Partial<D
 export function withStoredSettings(config: unknown, path: string = settingsFilePath()): DoubaoSettings {
   const base: DoubaoSettings = {
     enabledModelIds: enabledIdsOf(config) ?? [],
-    toolEmulation: (config as { toolEmulation?: unknown } | undefined)?.toolEmulation === true,
+    toolEmulation: (config as { toolEmulation?: unknown } | undefined)?.toolEmulation !== false,
     profileDir: profileDirOf(config) ?? '',
     autoCheckin: (config as { autoCheckin?: unknown } | undefined)?.autoCheckin === true,
   }

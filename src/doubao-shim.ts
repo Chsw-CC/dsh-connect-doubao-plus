@@ -298,14 +298,17 @@ function describeRequestedModel(key: string | undefined): {
  * the inbound `model` is a catalog id that IS Doubao's `model_item_key`, and
  * `reasoning_effort` is the adapter's level spelling.
  */
-export function requestOptions(parsed: {
-  model?: string | undefined
-  reasoning_effort?: string | null | undefined
-}): {
+export function requestOptions(
+  parsed: {
+    model?: string | undefined
+    reasoning_effort?: string | null | undefined
+  },
+): {
   modelKey?: string
   reasoningLevel?: 'low' | 'mid' | 'high' | 'xhigh' | 'max'
   skill?: DoubaoSkillName
   deepThink?: boolean
+  taskMode?: boolean
 } {
   const level = toDoubaoLevel(parsed.reasoning_effort)
   /**
@@ -1427,8 +1430,12 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
       let visibleAnswerText = result.text
       let calls: EmulatedToolCall[] = []
       if (emulate) {
-        const parsedCalls = parseToolCalls(result.text)
-        calls = parsedCalls.calls
+        const parsedCalls = parseToolCalls(result.text, parsed.tools ?? [])
+        // A 「工作任务」 turn does not answer with a fence: the server dispatches
+        // workspace commands and the tool_local responder hands back the calls it
+        // bridged. Those are already DSH calls, so they join the fenced ones
+        // instead of being dropped on the floor.
+        calls = [...parsedCalls.calls, ...(result.toolCalls ?? [])]
         visibleAnswerText = parsedCalls.text
         const visible = parsedCalls.text.trim() === '' ? ' ' : parsedCalls.text
         if (parsedCalls.text.trim() !== '' || calls.length > 0) markFirstToken()
@@ -1628,6 +1635,9 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
         return
       }
 
+      const imageModel = isImageModel(parsed.model)
+      const selectedOptions = requestOptions(parsed)
+
       // Refuse before spending quota when the account has no headroom.
       //
       // The memoised reading is consulted first: five minutes out of every six
@@ -1647,7 +1657,6 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
       // this turn adds. A continuation sends only that delta plus the id the
       // server issued last time; anything uncertain starts a new conversation,
       // which is the previous behaviour and never worse.
-      const imageModel = isImageModel(parsed.model)
       const sessionKey = sessionKeyOf(parsed.messages)
       const known = sessions.get(sessionKey)
       // ---- circuit valve ------------------------------------------------
@@ -1720,10 +1729,15 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
       const { signal, onActivity, clientGone, abortUpstream } = createRequestLifecycle(res)
 
       const upstreamOptions = {
-        ...requestOptions(parsed),
+        ...selectedOptions,
         // Cancellation has to reach the socket, not just our side: without it
         // the upstream turn keeps running to completion after everyone left.
         signal,
+        // 「工作任务」 turns dispatch their local workspace commands through the
+        // tool_local responder, which can only bridge an operation onto a tool
+        // this request DECLARED. Without this the bridge sees an empty list and
+        // every task-mode file operation has to be refused.
+        ...parsed.tools === undefined ? {} : { declaredTools: parsed.tools },
         ...isContinuationTurn && known !== undefined ? { conversationId: known.conversationId, continueConversation: true } : {},
       }
       /** Record the thread id the server handed back, for the next turn. */
@@ -1787,7 +1801,15 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
         remember(result.conversationId)
         // Same contract as the streaming path: the fence is parsed out of the
         // visible text and becomes tool_calls, never prose the user must read.
-        const emulated = emulate ? parseToolCalls(result.text) : { calls: [], text: result.text }
+        const emulated = emulate
+          ? (() => {
+              const parsedCalls = parseToolCalls(result.text, parsed.tools ?? [])
+              // Task-mode turns deliver their calls through the tool_local
+              // responder, not a fence; both are DSH calls and both must reach
+              // the harness or the turn reports work it never did.
+              return { calls: [...parsedCalls.calls, ...(result.toolCalls ?? [])], text: parsedCalls.text }
+            })()
+          : { calls: [], text: result.text }
         const content = [
           emulated.text,
           result.images.length > 0 ? await imageMarkdownLocal(result.images) : '',

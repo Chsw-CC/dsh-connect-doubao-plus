@@ -37,20 +37,15 @@ export interface DoubaoSettings {
   /**
    * Simulate tool calling in the prompt so Doubao can drive the Harness tools.
    *
-   * ON by default — the schema default below is `true`, and
-   * `toolEmulationOf()` treats only an explicit `false` as "off". (This comment
-   * used to say "OFF by default", which contradicted both.)
+   * ON by default: Doubao ignores an OpenAI `tools` array, so the plugin carries
+   * this request's DSH-declared tools in the prompt and converts a matching
+   * response back to `tool_calls`. The DSH host still enforces its current-session
+   * tool permissions and performs the actual workspace operation; this plugin
+   * never writes files itself. The selected DSH tool list is the parser allow-list.
    *
-   * Doubao's endpoint ignores a `tools` array outright (measured
-   * 2026-10-22: it answered with its OWN server-side search skill and never
-   * referenced our declarations), so the only channel available is the prompt:
-   * describe the tools, then parse a fenced block back into `tool_calls`.
-   *
-   * Measured 2026-11-02 with a two-tool sandbox loop: 9/9 calls well-formed,
-   * 5/5 rounds converged, ~11.5s per round, one duplicate call. It is a
-   * SIMULATION and can degrade when the upstream model changes its output
-   * habits, which is why the card exposes the switch and the prompt contract
-   * spells out the failure modes.
+   * Work-task models use a separate upstream local runtime and cannot safely
+   * execute DSH tools through this path; requests combining them are rejected.
+   * The switch can be disabled at any time.
    */
   toolEmulation: boolean
   /**
