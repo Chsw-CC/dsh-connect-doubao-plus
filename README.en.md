@@ -8,7 +8,7 @@
 > itself talks to Doubao over HTTPS with your session.
 
 [![release](https://img.shields.io/github/v/release/Chsw-CC/dsh-connect-doubao-plus)](https://github.com/Chsw-CC/dsh-connect-doubao-plus/releases)
-[![version](https://img.shields.io/badge/version-0.14.0-blue)](./CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.15.0-blue)](./CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 [![platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](#platform-support)
 [![dshfind](https://img.shields.io/badge/dshmarket-dshfind-blueviolet)](https://dshfind.dev)
@@ -38,7 +38,7 @@
 - **Reasoning passthrough and effort ladders** — thinking content is streamed verbatim; the ladder comes from the per-model `reasoning_effort_config`, measured values 3 / 4 / 5, higher levels declared only in the menu. Deep thinking is on by default; `DSH_DOUBAO_DEEP_THINK=0` turns it off.
 - **Seedream image generation** — end to end; images stream to disk with a 24 MB per-image and 8-per-turn ceiling; over-limit images keep their remote URL instead of being written locally.
 - **Quota panel and daily check-in** — an available-credits total on top, then monthly and grant windows with separate countdowns; one-click 「天天领额度」 (+200/day), plus an optional automatic check-in (off by default, Beijing-time day boundary).
-- **Tool emulation (on by default)** — OpenAI `tools` → `doubao-tool` fence → `tool_calls`, so Doubao can drive DSH's local tools; disable with `toolEmulation: false`.
+- **Tool emulation (on by default)** — OpenAI `tools` → `doubao-tool` fence → `tool_calls`, so Doubao can drive DSH's local tools. Parsing only accepts tools the request actually declared; workspace permissions and execution stay on the Harness side. Disable with `toolEmulation: false`.
 - **Local-only loop** — chat goes through a shim bound to `127.0.0.1` with a per-process shared secret; any non-local request gets 401. Credentials are sealed with DPAPI / AES-256-GCM and cached in-process for 10 minutes.
 - **Command-line checks** — `doctor` verifies credentials, account, shim, quota and models without spending quota; `probe` runs one real chat as a smoke test.
 
@@ -62,7 +62,7 @@
 
 ```bash
 # install from the tarball (recommended)
-dsh plugin --profile desktop add "<path>/dsh-connect-doubao-plus-0.14.0.tgz"
+dsh plugin --profile desktop add "<path>/dsh-connect-doubao-plus-0.15.0.tgz"
 ```
 
 > This plugin is not on the npm registry and does not support `dsh plugin add <git url>`: `prepack` needs `npm`, while the runtime shipped with Harness only has `node`. Both the tarball and the source directory load the already-built `lib/` — no build step.
@@ -175,6 +175,16 @@ DSH (pi-ai provider)
    `710010702`), answers `cmd_call` via `upload_command_result` + `msg/complete`, and
    stops on `agent_finished`. Incremental `CHUNK_DELTA` frames are split into
    thinking/answer by their block id.
+   A `cmd_call` then takes one of two paths: the runtime's **own bookkeeping**
+   (`init_agent_workspace`, `append_workspace_trajectory_memory`, `write_workspace_*`)
+   is performed locally, but only for paths under the runtime's `.sessions/` prefix —
+   judged by which paths it writes, not by a name list, so a new command name cannot
+   slip through. **Real workspace operations** are mapped onto DSH tools the current
+   request declared (`write_file` / `append_file` / Bash) and executed by the host,
+   with `finish_reason` becoming `tool_calls`; paths containing `..`, absolute paths
+   and unmappable operations fail explicitly instead of being reported as done. In a
+   PTC session (only `run_code` declared) file operations are compiled into a program.
+   A failed mapping writes one diagnostic line to `~/.dsh/doubao-task.log` — failures only.
 5. **Read-only routes** — `/plugins/dsh-connect-doubao-plus/quota` and `/catalog` serve quota
    and catalog from an **explicit allow-list** (no upstream field is passed through),
    and refuse non-loopback origins.

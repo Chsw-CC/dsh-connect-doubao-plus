@@ -4,6 +4,32 @@
 
 ---
 
+## 0.15.0 — 2026-11-22
+
+> 同步上游 0.8.0：**「工作任务」模式真正接上 DSH 的工作区工具**。此前任务模式只要请求带工具就整体拒绝，DSH 在该模式下读写不了任何文件；这一版把任务运行时下发的工作区命令桥接成本次请求已声明的 DSH 工具调用，由宿主执行，`finish_reason` 正确变为 `tool_calls`。
+
+### 同步上游（0.8.0）
+
+- **任务模式工具桥接**：`tool_local` 应答器把 `cmd_call` 里的 `operations`（`write_file` / `append_file` / 建目录建空文件）映射为 `write_file` / `append_file` / Bash 等**本次请求声明过**的工具调用交给 DSH 执行。
+- **运行时记账本地完成**：`init_agent_workspace` / `append_workspace_trajectory_memory` / `write_workspace_*` 只写 `.sessions/` 前缀内的路径，由插件本地建目录写文件并回成功。判定按**写入路径**而非命令名清单——此前误转交给 DSH，运行时会回「工作区未就绪」并重发同一条命令，形成死循环。
+- **PTC 会话**（只声明 `run_code`）：文件操作编译成程序交给 `run_code` 执行，不再整轮拒绝。
+- **越界与不可映射一律显式失败**：路径含 `..`、绝对路径、缺少内容、操作数过多都返回失败，绝不伪报成功；失败时向 `~/.dsh/doubao-task.log` 写一行诊断（命令 id、操作、已声明工具、原因），正常回合不落盘。
+- **`append_file` 与 `mode: "append"`** 只路由给真正声明了追加语义的工具，绝不降级成覆盖写入。
+
+### 本仓库（保留与适配）
+
+- **保留 fork 的凭据代际（epoch）**：上游的应答器在 `absorbSetCookies` 时不带代际，会接受换号前那轮请求的会话轮换。合并后签名同时接收 `signal` / `epoch` / `declaredTools`，两条路径的语义都在。
+- **保留 fork 的流式实现**：上游把 `consumeStream` 加了 `harvestNotifyText` 选项并在任务模式下改变发出时机；本仓库的流式写出与思考链透传已按自己的时序验证过（含断流即停与停止生成），故不并入该选项，任务模式的工具调用仍通过 `toolCalls` 回传。
+- **保留 fork 的 `toolEmulation` 默认值**：上游 schema 默认 `true`，与本仓库既有默认一致；`index.ts` 的默认配置对象按本仓库结构保留 `autoCheckin`，同时采纳上游的 `toolEmulation: true`。
+
+### 重构
+
+- **任务桥接诊断抽成 `logTaskBridgeFailure()`**：刚才的合并把「写 stderr + 落盘 `doubao-task.log`」的内联块带进应答器；抽成一个函数，失败路径一处收口。
+
+### 校对
+
+- README（中/英）补上任务模式的两种 `cmd_call` 处置方式（记账本地完成 / 真实操作桥接给 DSH）、越界拒绝规则与诊断日志位置。
+
 ## 0.14.0 — 2026-11-19
 
 > 合入社区 PR #21 的 **macOS 模型发现**：此前 macOS 上登录、对话、额度都通了，但模型清单永远回落成 6 条静态条目 —— 因为数据目录探测整段被一个 `platform !== 'win32'` 判断挡住。这一版让 macOS 也能读到客户端菜单缓存。另把两处重复的额度描述拼装收成共享函数。

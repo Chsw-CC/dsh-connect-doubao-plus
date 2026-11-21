@@ -5,7 +5,7 @@
 > 会话只密封在本机（Windows DPAPI / 其它平台 AES-256-GCM）；Harness 到插件的流量只走 `127.0.0.1`，插件再以你的会话向豆包发起 HTTPS。
 
 [![release](https://img.shields.io/github/v/release/Chsw-CC/dsh-connect-doubao-plus)](https://github.com/Chsw-CC/dsh-connect-doubao-plus/releases)
-[![version](https://img.shields.io/badge/version-0.14.0-blue)](./CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.15.0-blue)](./CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 [![platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](#平台支持)
 [![dshfind](https://img.shields.io/badge/dshmarket-dshfind-blueviolet)](https://dshfind.dev)
@@ -34,7 +34,7 @@
 - **思考链与思考档位** —— 思考过程逐字透传；档位阶梯来自菜单 `reasoning_effort_config`，逐模型不同，实测值 3 / 4 / 5，更高档仅见菜单声明。深度思考默认开启，`DSH_DOUBAO_DEEP_THINK=0` 可关。
 - **Seedream 生图** —— 端到端打通；图片流式落盘，单图 24 MB、单轮 8 张上限；超限保留远程 URL，不落盘。
 - **额度看板与签到** —— 顶部「可用额度」汇总剩余合计，下面分月度与赠送双窗口、各自倒计时；「天天领额度」一键领取（+200/天），可选每天自动签到（默认关闭，按北京时间日界）。
-- **工具模拟（默认开启）** —— OpenAI `tools` → `doubao-tool` 围栏 → `tool_calls`，让豆包驱动 DSH 本地工具；`toolEmulation: false` 可关。
+- **工具模拟（默认开启）** —— OpenAI `tools` → `doubao-tool` 围栏 → `tool_calls`，让豆包驱动 DSH 本地工具；解析只接受本次请求真正声明的工具，工作区权限与实际执行仍在 Harness 一侧；`toolEmulation: false` 可关。
 - **本地闭环** —— 对话走只监听 `127.0.0.1` 的 shim，带每进程共享密钥，非本机请求一律 401；凭据用 DPAPI / AES-256-GCM 密封，进程内缓存 10 分钟。
 - **命令行体检** —— `doctor` 不消耗额度即可核对凭据、账号、shim、额度、模型五项；`probe` 做一次真实对话冒烟。
 
@@ -58,7 +58,7 @@
 
 ```bash
 # 从 tarball 安装（推荐）
-dsh plugin --profile desktop add "<路径>/dsh-connect-doubao-plus-0.14.0.tgz"
+dsh plugin --profile desktop add "<路径>/dsh-connect-doubao-plus-0.15.0.tgz"
 ```
 
 > 本插件不走 npm registry，也不支持 `dsh plugin add <git 地址>`：`prepack` 需要 `npm`，而 Harness 自带运行时只有 `node`。tarball 与源码目录都由已构建的 `lib/` 直接加载，不需要构建步骤。
@@ -151,6 +151,17 @@ POST /alice/office/tool_local/msg/complete           # 标记该指令完成
 服务端按 `${unique_key}:${device_id}:${aid}:message:${seq}` 顺序下发（`seq = 0,1,2,…`）：
 `command: 6003`（`cmd_call`）需回传结果，`command: 6004`（`agent_finished`）表示本轮结束。
 插件在流式生成期间并发跑应答器把这些走完，于是任务回合不再落到 `710010702`。**实测 2026-11-05 通过。**
+
+应答器收到 `cmd_call` 后分两类处理：
+
+- **运行时自己的记账**（`init_agent_workspace`、`append_workspace_trajectory_memory`、`write_workspace_*` 等）：
+  只在 `.sessions/` 前缀内建目录/写文件，由插件本地完成并回成功。此前把手误转交给 DSH，运行时会答
+  「工作区未就绪」并重发同一条命令，形成死循环。判定按**写了哪些路径**，不按命令名清单，豆包新增命令名不会静默漏判。
+- **真正的工作区操作**：映射成**本次请求已声明**的 DSH 工具调用（`write_file` / `append_file` / Bash 等）交给宿主执行；
+  `finish_reason` 正确变为 `tool_calls`。路径含 `..`、绝对路径或无法映射时**明确报失败**，不伪报成功。
+  PTC 会话（只声明 `run_code`）下，文件操作编译成程序交给 `run_code` 执行。
+
+映射失败时会往 `~/.dsh/doubao-task.log` 写一行诊断（命令 id、操作、已声明工具、拒绝原因），只写失败，正常的回合不落盘。
 
 > ⚠️ **`msg/ack` 必须单条查询。** `{ msg_ids: [0,1,2,3,4,5,6] }` 会整体失败并返回
 > `{"code":710010702,"msg":"系统错误"}`——批里只要含一个服务端尚未生成的 `seq`，整批就废。

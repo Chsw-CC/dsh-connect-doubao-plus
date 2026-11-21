@@ -1191,6 +1191,34 @@ export async function applyTaskBookkeeping(
   return { ok: true, message: 'ok' }
 }
 
+/**
+ * Record why a task-mode command could not be bridged onto a DSH tool.
+ *
+ * Why a task turn ended in `LOCAL_EXECUTION_UNAVAILABLE` is otherwise
+ * unanswerable: the payload is the server's, and the mapper's refusal reason
+ * names only the category. Both halves are written — stderr for a live host, a
+ * file for a client that started and stopped the plugin — and only on failure,
+ * so a healthy turn writes nothing. Diagnostics must never break the request,
+ * hence the swallowed write error.
+ */
+function logTaskBridgeFailure(
+  commandId: unknown,
+  inputObj: Record<string, any>,
+  declaredTools: readonly InboundTool[],
+  reason: string | undefined,
+): void {
+  const line = '[task] command=' + String(commandId ?? '')
+    + ' operations=' + JSON.stringify(inputObj.operations ?? [])
+    + ' declared=' + JSON.stringify(declaredTools.map((tool) => tool.function?.name ?? ''))
+    + ' reason=' + (reason ?? '(none)') + '\n'
+  process.stderr.write(line)
+  try {
+    appendFileSync(join(homedir(), '.dsh', 'doubao-task.log'), line)
+  } catch {
+    /* diagnostics must never break the request */
+  }
+}
+
 async function runToolLocalResponder(
   uniqueKey: string,
   credentials: DoubaoCredentials,
@@ -1313,20 +1341,7 @@ async function runToolLocalResponder(
         const mapped = taskWorkspaceOperationsToDshCalls(inputObj, declaredTools)
         const handoffReason = mapped.reason ?? '操作已作为 DSH 工具调用转交；等待宿主执行结果。'
         if (mapped.calls.length === 0) {
-          // Why a task turn ended in LOCAL_EXECUTION_UNAVAILABLE is otherwise
-          // unanswerable: the payload is the server's, and the mapper's refusal
-          // reason names only the category. Log both, plus what was declared.
-          // Only on failure, so a healthy turn writes nothing.
-          const line = '[task] command=' + String(cmdCall.id ?? '')
-            + ' operations=' + JSON.stringify(inputObj.operations ?? [])
-            + ' declared=' + JSON.stringify(declaredTools.map((tool) => tool.function?.name ?? ''))
-            + ' reason=' + (mapped.reason ?? '(none)') + '\n'
-          process.stderr.write(line)
-          try {
-            appendFileSync(join(homedir(), '.dsh', 'doubao-task.log'), line)
-          } catch {
-            /* diagnostics must never break the request */
-          }
+          logTaskBridgeFailure(cmdCall.id, inputObj, declaredTools, mapped.reason)
         }
         unsupportedLocalTaskResult(inputObj, handoffReason)
         try {
