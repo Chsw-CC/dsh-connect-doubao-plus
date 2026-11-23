@@ -67,6 +67,29 @@ export const BREAK_STREAM_ENDPOINT = 'https://www.doubao.com/im/message/break_st
 const STOP_GENERATION_TIMEOUT_MS = 5_000
 
 /**
+ * How long a streaming turn may go SILENT before it is treated as hung, in ms.
+ *
+ * `fetch`'s own timeout does not cover this: it stops once response headers
+ * arrive, and a body that stalls one frame in then waits forever. A user
+ * who pressed Stop had no effect either, because the read loop never checked
+ * the signal -- both ended in the same frozen turn with no way back but a
+ * restart. This is a per-chunk budget, not a cap on the whole answer: a long
+ * reply that keeps streaming is never cut off.
+ */
+const STREAM_IDLE_TIMEOUT_MS = 120_000
+
+/**
+ * Hard ceiling on the task-mode ACK responder, in ms.
+ *
+ * The responder's guard was `while (!signal?.aborted)`, which is ALWAYS true
+ * when no signal was passed (`!undefined === true`). Every caller that omits
+ * one left the loop with no exit but `isStreamDone()` -- and if the stream
+ * stalled, nothing set that either, so the turn sat on a 180ms ACK poll
+ * forever. This budget is the bound that does not depend on a signal existing.
+ */
+const TASK_RESPONDER_MAX_MS = 10 * 60 * 1000
+
+/**
  * Client version strings. These are the desktop app build this was last
  * verified against (M9), and they MOVE with every Doubao release — a newer app
  * sends different values here and a very old one will eventually stop being
@@ -1269,7 +1292,11 @@ async function runToolLocalResponder(
 
   let seq = 0
   let postStreamPolls = 0
-  while (!signal?.aborted) {
+  // The only unconditional exit. 'aborted' needs a signal to exist, and
+  // 'isStreamDone' needs the stream to still be delivering; a stalled upstream
+  // satisfies neither, so the loop must also be able to outlive its own patience.
+  const deadline = Date.now() + TASK_RESPONDER_MAX_MS
+  while (!signal?.aborted && Date.now() < deadline) {
     if (isStreamDone()) {
       if (seq === 0 || postStreamPolls >= 8) break
       postStreamPolls += 1
@@ -1506,7 +1533,7 @@ async function streamOnce(
   let result: DoubaoChatResult | undefined
   let streamError: unknown
   try {
-    result = await consumeStream(response, options.callbacks)
+    result = await consumeStream(response, options.callbacks, options.signal)
   } catch (error) {
     streamError = error
   } finally {
@@ -1694,9 +1721,36 @@ export async function stopGeneration(
 async function consumeStream(
   response: Response,
   callbacks?: StreamCallbacks,
+  signal?: AbortSignal,
 ): Promise<DoubaoChatResult> {
   const reader = response.body?.getReader()
   if (!reader) throw new DoubaoUpstreamError('Doubao returned an empty response body.')
+
+  // This loop owns the ONLY unbounded wait in the plugin: a stream that stalls
+  // leaves `reader.read()` pending forever, and it is not covered by the
+  // signal that `fetch` was given -- that signal governs connection setup, not
+  // body consumption after the reader has been handed out. So the drop is
+  // wired up here, and the loop checks it before every wait.
+  let aborted = signal?.aborted === true
+  const onAbort = (): void => {
+    aborted = true
+    void reader.cancel().catch(() => {})
+  }
+  signal?.addEventListener('abort', onAbort, { once: true })
+  /**
+   * Re-armed on every chunk, so it measures SILENCE rather than total turn
+   * length: an answer that keeps streaming is never cut off, however long it
+   * runs, while one that has stopped arriving is cancelled instead of hanging.
+   */
+  let idleTimer: ReturnType<typeof setTimeout> | undefined
+  const armIdleWatchdog = (): void => {
+    if (idleTimer !== undefined) clearTimeout(idleTimer)
+    idleTimer = setTimeout(() => {
+      aborted = true
+      void reader.cancel().catch(() => {})
+    }, STREAM_IDLE_TIMEOUT_MS)
+    idleTimer.unref?.()
+  }
   const decoder = new TextDecoder()
   let buffer = ''
   const texts: string[] = []
@@ -1964,6 +2018,8 @@ function collectTelemetry(payload: unknown, target: DoubaoUpstreamTelemetry): vo
 
   try {
     while (true) {
+      if (aborted) throw new Error('Doubao stream aborted.')
+      armIdleWatchdog()
       const { done, value } = await reader.read()
       if (done) break
       buffer += decoder.decode(value, { stream: true })
@@ -1982,6 +2038,8 @@ function collectTelemetry(payload: unknown, target: DoubaoUpstreamTelemetry): vo
       for (const frame of frames) handle(frame)
     }
   } finally {
+    if (idleTimer !== undefined) clearTimeout(idleTimer)
+    signal?.removeEventListener('abort', onAbort)
     // Cancel before releasing: releasing the lock with the body still unread
     // leaves the connection (and the upstream turn) running to completion.
     await reader.cancel().catch(() => {})
