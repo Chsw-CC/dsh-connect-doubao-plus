@@ -1937,6 +1937,16 @@ function collectTelemetry(payload: unknown, target: DoubaoUpstreamTelemetry): vo
       const code = record.error_code
       const message = record.error_msg ?? 'unknown stream error'
       const rateLimited = code === 710022004 || /rate limit/i.test(message)
+      // Content moderation is a different stop than the slider: no retry will
+      // clear it, and the user can actually fix the wording.
+      if (isContentModerationNotice(message)) {
+        throw new DoubaoUpstreamError(
+          `豆包内容审核拦截了这条消息：${message}`,
+          code,
+          false,
+          { kind: 'content_blocked' },
+        )
+      }
       throw new DoubaoUpstreamError(
         rateLimited
           ? '豆包请求触发风控（710022004）。请停止重试并等待风控缓解；如果豆包网页出现人机验证，请完成验证。插件无法绕过风控。'
@@ -2092,6 +2102,18 @@ function collectTelemetry(payload: unknown, target: DoubaoUpstreamTelemetry): vo
 
   // A creation streams the same task several times (placeholder → filled), so
   // collapse by URL and keep first-seen order.
+  // The notice can also arrive as ordinary reply text. Returning it as the
+  // answer would make the plugin look like it "replied" with a policy message
+  // and would hide the one fact the user can act on.
+  if (isContentModerationNotice(text)) {
+    throw new DoubaoUpstreamError(
+      `豆包内容审核拦截了这条消息：${text}`,
+      undefined,
+      false,
+      { kind: 'content_blocked' },
+    )
+  }
+
   const uniqueImages = [...new Map(images.map((image) => [image.url, image])).values()]
   if (!text && uniqueImages.length === 0) {
     const seen = [...events]
@@ -2203,6 +2225,15 @@ export type DoubaoErrorKind =
    * retry. Reported as CONTEXT_WINDOW_EXCEEDED so that path is taken.
    */
   | 'context_overflow'
+  /**
+   * Doubao's CONTENT moderation stopped the message — not the risk-control
+   * slider, not a broken upstream.
+   *
+   * Its own class because the only fix is the user's wording: the notice itself
+   * says 「涉嫌违反豆包使用规范」 and offers 反馈与举报, and resending identical
+   * text only adds to the same record.
+   */
+  | 'content_blocked'
 
 /** The server's business code for "this session is not valid". */
 const CODE_SESSION_DEAD = 710012001
@@ -2304,8 +2335,33 @@ export const DOUBAO_ERROR_HINTS: Readonly<Record<DoubaoErrorKind, string>> = {
     '豆包把这个账号路由到了「工作任务」代理，而该任务的执行运行时只存在于豆包客户端进程里，外部客户端接不上。请打开豆包客户端，把输入框上方的开关切回「对话」，然后重试；需要多步执行的话，交给 DSH 自己的工具来做。',
   upstream:
     '豆包返回了错误响应（不是网络问题，重试通常无效）。',
+  content_blocked:
+    '豆包的内容审核拦截了这条消息 —— 不是网络、额度或滑块风控的问题。插件不会也无法绕过内容审核。'
+    + '请换一种表达、或把问题拆小后重试；如果是误判，在豆包客户端长按该条消息 →「反馈与举报」。'
+    + '反复触发可能导致账号被限制。',
   context_overflow:
     '这次请求的内容超过了豆包单次请求上限（256 KiB 的 UTF-8 文本，约 26 万 ASCII 字符）。请压缩上下文或缩短单条消息后重试；DSH 通常会自动压缩并重发。',
+}
+
+/**
+ * Whether a text is Doubao's content-moderation notice rather than an answer.
+ *
+ * Deliberately narrow: a model that EXPLAINS the notice (a user asking
+ * 「这句提示是什么意思」) quotes it inside a normal reply, and turning that reply
+ * into an error would be worse than showing it. Both a head that names the
+ * message as violating and the appeal hint are required, and the text must be
+ * short — the real notice is one sentence.
+ */
+export function isContentModerationNotice(text: string): boolean {
+  const trimmed = text.trim()
+  if (trimmed === '' || trimmed.length > 200) return false
+  // The platform's own wording: names the policy it violated, prints the exact
+  // appeal button, and tells you how to reach it. A model explaining the notice
+  // paraphrases at least one of the three, which is what keeps it an answer.
+  const flagged = /涉嫌违反|违反[^。！？\n]{0,6}使用规范/.test(trimmed)
+  const appeal = /反馈与举报/.test(trimmed)
+  const instruction = /长按|本条消息|该内容|这条消息/.test(trimmed)
+  return flagged && appeal && instruction
 }
 
 /** Build a user-facing message for a Doubao failure. */

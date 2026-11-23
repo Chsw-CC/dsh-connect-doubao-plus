@@ -132,6 +132,9 @@ const KIND_STATUS: Readonly<Record<DoubaoErrorKind, number>> = {
   // 409, not 502: nothing is broken on the wire, and 502 would invite the host's
   // retry classifier to burn the budget on a state only a toggle can change.
   task_runtime_unavailable: 409,
+  // 400: the content was refused by policy. A 5xx would tell the user "the
+  // server broke" and invite a retry of text the server has already rejected.
+  content_blocked: 400,
 }
 
 function writeJson(res: ServerResponse, status: number, payload: unknown): void {
@@ -679,6 +682,9 @@ export function errorCodeFor(kind: DoubaoErrorKind, retryable: boolean): string 
   // and makes it stricter. A provider-specific code keeps it out of that retry set.
   if (kind === 'rate_limited') return 'RISK_CHALLENGE'
   if (kind === 'quota_exhausted') return 'RATE_LIMIT'
+  // A policy refusal is neither a transient fault nor a rate limit; naming it
+  // keeps it out of the host's retry set and tells the user what to change.
+  if (kind === 'content_blocked') return 'CONTENT_BLOCKED'
   if (kind === 'network') return retryable ? 'TIMEOUT' : 'SERVER'
   return 'SERVER'
 }
