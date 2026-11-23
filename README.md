@@ -22,6 +22,11 @@
 `%USERPROFILE%\.dsh\doubao-credentials-browser.dpapi`。整个流程只在登录那一刻需要人，
 之后都是纯 HTTP 调用。
 
+同一个浏览器窗口还会顺手记录**网页请求身份**（`User-Agent` / `Referer` / `sec-ch-ua` / `aid` /
+`device_id` …），写到 `%USERPROFILE%\.dsh\doubao-browser-fingerprint.json`。这样插件发出的请求
+和网页自己发出的**是同一套身份**，不会出现「网页 cookie + 桌面端伪装」的错配——那正是触发
+`710022004` 风控的典型原因。**新用户扫码即完成，无需任何额外步骤。**
+
 | 要求 | 说明 |
 | --- | --- |
 | **扫码登录一次** | 未登录 → 卡片显示「未登录」，provider 不可用 |
@@ -305,6 +310,14 @@ dsh plugin --profile desktop add "E:\path\to\dsh-connect-doubao"
 dsh-connect-doubao-doctor
 dsh-connect-doubao-doctor --json
 
+# 网页身份：登录时已自动记录；从旧版本升级上来补一次（一次性，不发消息不耗额度）
+dsh-connect-doubao-doctor --fingerprint
+
+# 风控恢复
+dsh-connect-doubao-doctor --verify     # 打开官方页面，人工过滑块/扫码
+dsh-connect-doubao-doctor --resume     # 人工验证完成后解除本地冷却
+dsh-connect-doubao-doctor --relay on   # 可选：对话改走真实浏览器（任务模式/生图仍走直连）
+
 # 冒烟探针（会消耗一次推理额度）
 dsh-connect-doubao-probe --prompt "hi"
 dsh-connect-doubao-probe --prompt "hi" --model 5 --thinking high --json
@@ -320,7 +333,7 @@ dsh-connect-doubao-probe --prompt "hi" --model 5 --thinking high --json
 --timeout <ms>               超时（默认 120000）
 ```
 
-`doctor` 输出五项独立结论：凭据 / 账号 / provider 装配 / 额度 / 模型发现。
+`doctor` 输出六项独立结论：凭据 / 网页身份 / 账号 / provider 装配 / 额度 / 模型发现。
 凭据只报**数量**，不报值。
 
 ---
