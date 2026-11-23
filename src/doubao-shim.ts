@@ -73,6 +73,9 @@ import {
   type DoubaoSkillName,
 } from './doubao-catalog.ts'
 import { isDiscoveredTaskModel, peekModels } from './doubao-discovery.ts'
+import { liveModels } from './doubao-discovery.ts'
+import { browserRelayEnabled } from './doubao-browser-relay.ts'
+import { homeDir } from './doubao-profile.ts'
 import {
   buildToolContract,
   parseToolCalls,
@@ -136,6 +139,8 @@ function isJsonContentType(req: IncomingMessage): boolean {
 
 /** HTTP status each Doubao failure class surfaces as. */
 const KIND_STATUS: Readonly<Record<DoubaoErrorKind, number>> = {
+  // 400: the request itself is malformed (too large), not the upstream.
+  context_overflow: 400,
   rate_limited: 429,
   quota_exhausted: 429,
   session_dead: 401,
@@ -391,7 +396,7 @@ export function imageMarkdown(images: readonly DoubaoImage[]): string {
  */
 export function imageCacheDir(): string {
   const override = process.env.DSH_DOUBAO_IMAGES_DIR?.trim()
-  return override !== undefined && override !== '' ? override : join(homedir(), '.dsh', 'doubao-images')
+  return override !== undefined && override !== '' ? override : join(homeDir(), '.dsh', 'doubao-images')
 }
 
 /** Per-download deadline. A CDN that goes quiet used to hang the turn forever. */
@@ -707,7 +712,7 @@ export function buildImagePrompt(
   return fallback
 }
 
-function buildPrompt(
+export function buildPrompt(
   messages: Array<{
     role?: string
     content?: unknown
@@ -758,6 +763,56 @@ function buildPrompt(
   return turns.join('\n\n')
 }
 
+/**
+ * Room left under the hard body ceiling for the JSON envelope, headers and the
+ * fields the shim adds around the prompt (model keys, client_meta, ext).
+ */
+const DOUBAO_BODY_SAFETY_BYTES = 8_192
+/** Conservative prompt target, below the measured 256 KiB rejection wall. */
+const DOUBAO_PROMPT_BUDGET_BYTES = 220_000
+
+/**
+ * Fit the outgoing transcript under Doubao's byte ceiling, dropping the OLDEST
+ * turns first.
+ *
+ * This is the backstop the token-based compactor cannot provide. Compaction
+ * reasons in TOKENS against the declared window, but the server rejects on the
+ * UTF-8 BYTES of the finished request — and the finished request includes the
+ * tool contract, which is appended after the transcript and is invisible to the
+ * token meter (131 real DSH schemas measure ~139 KB on their own). So a session
+ * can sit comfortably under the token threshold and still be rejected, which is
+ * exactly the loop this ends.
+ *
+ * Keeps the newest turns and always keeps the final message, because that is
+ * the turn being answered. Truncating an earlier turn is lossy; dropping the
+ * question would be wrong.
+ */
+export function fitPromptToByteBudget<T extends { role?: string; content?: unknown }>(
+  messages: readonly T[],
+  contractText: string,
+): { messages: T[]; dropped: number; truncated: boolean } {
+  const budget = DOUBAO_PROMPT_BUDGET_BYTES - DOUBAO_BODY_SAFETY_BYTES - Buffer.byteLength(contractText, 'utf8')
+  const bytes = (list: readonly T[]): number => Buffer.byteLength(buildPrompt(list as never), 'utf8')
+  if (bytes(messages) <= budget) return { messages: [...messages], dropped: 0, truncated: false }
+  if (messages.length === 0) return { messages: [], dropped: 0, truncated: false }
+
+  // Newest-first prefix: keep the tail, grow it while it still fits.
+  let keep = 1
+  while (keep < messages.length && bytes(messages.slice(messages.length - keep - 1)) <= budget) keep += 1
+  const kept = messages.slice(messages.length - keep)
+  const dropped = messages.length - keep
+  if (bytes(kept) <= budget) return { messages: kept, dropped, truncated: false }
+
+  // A single message is still over budget. Cut its text, keeping the tail (the
+  // end of the last user message is what the turn is about).
+  const last = kept[kept.length - 1]!
+  const text = typeof last.content === 'string' ? last.content : JSON.stringify(last.content ?? '')
+  const overshoot = bytes(kept) - budget
+  const charsToCut = Math.min(text.length, Math.max(0, overshoot) + 1)
+  const clipped = { ...last, content: text.slice(charsToCut) } as T
+  return { messages: [clipped], dropped, truncated: true }
+}
+
 export interface DoubaoShimOptions {
   /** Resolve credentials per request, so a re-login is picked up without a restart. */
   resolveCredentials?: () => DoubaoCredentials
@@ -779,8 +834,50 @@ export interface DoubaoShimOptions {
  * a non-retryable failure that says TIMEOUT invites a retry storm that cannot
  * succeed.
  */
-function errorCodeFor(kind: DoubaoErrorKind, retryable: boolean): string {
-  if (kind === 'rate_limited' || kind === 'quota_exhausted') return 'RATE_LIMIT'
+/**
+ * Doubao's request-body ceiling, in UTF-8 bytes of message text.
+ *
+ * Measured 2026-11-22 against the live endpoint: 262,144 ASCII characters are
+ * accepted and 262,145 are rejected with 710020202, so the bound is exactly
+ * 256 KiB on the encoded text. Tokens are NOT the unit here — the server
+ * answers "common invalid param" rather than a context-length error, which is
+ * why this used to surface as an unactionable parameter failure.
+ */
+const DOUBAO_MAX_BODY_BYTES = 262_144
+
+/**
+ * Re-label an invalid-param rejection as a context overflow when the prompt is
+ * provably over the ceiling.
+ *
+ * The two causes share one server code, so the size is what tells them apart —
+ * and the size is something we can measure locally before spending a retry.
+ */
+export function overflowIfOversized(error: unknown, prompt: string): unknown {
+  if (!isInvalidParamFailure(error)) return error
+  const bytes = Buffer.byteLength(prompt, 'utf8')
+  if (bytes <= DOUBAO_MAX_BODY_BYTES) return error
+  // The English marker is load-bearing: the host classifies overflow by matching
+  // provider wording, and a purely Chinese sentence matches none of its
+  // patterns — the failure would reach the user as an unclassified error even
+  // though we know exactly what it is.
+  return new DoubaoUpstreamError(
+    `context window exceeded: 豆包请求体 ${bytes} 字节，超过上限 ${DOUBAO_MAX_BODY_BYTES} 字节（256 KiB）。`
+      + '请压缩上下文或缩短单条消息后重试。',
+    undefined,
+    false,
+    { kind: 'context_overflow' },
+  )
+}
+
+export function errorCodeFor(kind: DoubaoErrorKind, retryable: boolean): string {
+  // The host's own overflow classifier keys on this exact code; reporting
+  // "SERVER" here is what made an oversized prompt look like a broken upstream.
+  if (kind === 'context_overflow') return 'CONTEXT_WINDOW_EXCEEDED'
+  // 710022004 is a slider CAPTCHA, not bandwidth rate limiting. The host retries
+  // RATE_LIMIT up to five times by default, which both cannot clear the challenge
+  // and makes it stricter. A provider-specific code keeps it out of that retry set.
+  if (kind === 'rate_limited') return 'RISK_CHALLENGE'
+  if (kind === 'quota_exhausted') return 'RATE_LIMIT'
   if (kind === 'network') return retryable ? 'TIMEOUT' : 'SERVER'
   return 'SERVER'
 }
@@ -1398,7 +1495,11 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
           credentials: accounting.credentials,
         })
       } catch (error) {
-        if (!accounting.isContinuationTurn || !isInvalidParamFailure(error) || visibleContentSent) throw error
+        // Nothing visible has gone out, so a relabel is still safe: an oversized
+        // body is the host's cue to compact, not an upstream parameter error.
+        if (!accounting.isContinuationTurn || !isInvalidParamFailure(error) || visibleContentSent) {
+          throw overflowIfOversized(error, prompt)
+        }
         // The remembered thread was rejected as an invalid parameter (710020202):
         // nothing was stored server-side, so the same turn is re-issued as a
         // fresh conversation instead of failing — a stale id must cost one
@@ -1414,12 +1515,16 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
         if (process.env.DSH_DOUBAO_DEBUG_PLAN === '1') {
           process.stderr.write('[plan] continuation rejected (710020202); re-issuing as fresh conversation\\n')
         }
-        result = await chat(buildPrompt(parsed.messages ?? []) + accounting.emulatedContractText, {
-          ...requestOptions(parsed),
-          signal: lifecycle.signal,
-          callbacks,
-          credentials: accounting.credentials,
-        })
+        try {
+          result = await chat(buildPrompt(parsed.messages ?? []) + accounting.emulatedContractText, {
+            ...requestOptions(parsed),
+            signal: lifecycle.signal,
+            callbacks,
+            credentials: accounting.credentials,
+          })
+        } catch (retryError) {
+          throw isInvalidParamFailure(retryError) ? overflowIfOversized(retryError, prompt) : retryError
+        }
       }
       // Only a completed turn teaches us the thread id; a failed one leaves the
       // previous mapping alone so the next attempt can still continue it.
@@ -1583,7 +1688,7 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
 
       // Read-only quota view for the plugin UI. Never returns credentials.
       if (req.method === 'GET' && url.startsWith('/quota')) {
-        const quota = await fetchQuota()
+        const quota = await fetchQuota(options.resolveCredentials !== undefined ? { credentials: resolveCredentials() } : {})
         const monthly = findWindow(quota, 'monthly')
         writeJson(res, 200, {
           ok: true,
@@ -1668,7 +1773,9 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
       }
       // Image turns run standalone under `imageGen`; reusing a prior text or task
       // conversationId carries old mode/refusal context and causes text replies.
-      const continuing = !imageModel && isContinuation(parsed.messages, known)
+      // The browser relay opens a fresh official conversation per turn, so it
+      // always needs the full transcript rather than a server-side delta.
+      const continuing = !browserRelayEnabled() && !imageModel && isContinuation(parsed.messages, known)
       /**
        * What to send.
        *
@@ -1683,12 +1790,29 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
       const useDelta = delta.length > 0
       let isContinuationTurn = continuing && useDelta
       const outgoing = useDelta ? delta : (parsed.messages ?? [])
+      // The tool contract is appended to the prompt, so it has to be known before
+      // the transcript is fitted under the byte ceiling.
+      const emulate = !imageModel && emulationOn() && (parsed.tools?.length ?? 0) > 0
+      const emulatedContractText = emulate ? buildToolContract(parsed.tools ?? []) : ''
+      // Hard backstop: compaction reasons in tokens against the declared window,
+      // but Doubao rejects on request BYTES — and the contract is invisible to
+      // the token meter. Trim the oldest turns here rather than let the turn fail.
+      const fitted = imageModel
+        ? { messages: outgoing, dropped: 0, truncated: false }
+        : fitPromptToByteBudget(outgoing, emulatedContractText)
+      if (fitted.dropped > 0 || fitted.truncated) {
+        // Never silent: a dropped prefix changes what the model can see.
+        process.stderr.write(
+          `[fit] dropped=${fitted.dropped} truncated=${fitted.truncated} `
+            + `kept=${fitted.messages.length} contract=${Buffer.byteLength(emulatedContractText, 'utf8')}B\n`,
+        )
+      }
       // IMAGEGEN_SLIM_PROMPT: 生图模型只该看到用户那句描述。
       // 完整上下文（系统提示、工具清单、MCP、技能、历史）会让它先分析"该用哪个工具"，
       // 实测白等 1 分 54 秒才出图。这里只取最后一条 user 消息。
       const promptBody = imageModel
-        ? buildImagePrompt(parsed.messages ?? [], outgoing)
-        : buildPrompt(outgoing)
+        ? buildImagePrompt(parsed.messages ?? [], fitted.messages)
+        : buildPrompt(fitted.messages)
       if (!promptBody) {
         writeOpenAIError(res, 400, 'invalid_request', 'no usable message content')
         return
@@ -1699,8 +1823,6 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
        * with its own server-side search skill instead). Never append tool schemas
        * to image-generation prompts, or Doubao replies in text instead of drawing.
        */
-      const emulate = !imageModel && emulationOn() && (parsed.tools?.length ?? 0) > 0
-      const emulatedContractText = emulate ? buildToolContract(parsed.tools ?? []) : ''
       const prompt = emulate
         ? `${promptBody}${emulatedContractText}`
         : promptBody
@@ -1717,7 +1839,7 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
           + `RAW=${raw}\n${prompt.slice(0, 2000)}\n---\n`
         process.stderr.write(line)
         try {
-          appendFileSync(join(homedir(), '.dsh', 'doubao-prompt.log'), line)
+          appendFileSync(join(homeDir(), '.dsh', 'doubao-prompt.log'), line)
         } catch {
           /* diagnostics must never break the request */
         }
@@ -1730,6 +1852,7 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
 
       const upstreamOptions = {
         ...selectedOptions,
+        ...(options.resolveCredentials !== undefined ? { credentials } : {}),
         // Cancellation has to reach the socket, not just our side: without it
         // the upstream turn keeps running to completion after everyone left.
         signal,
@@ -1795,7 +1918,9 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
           abortUpstream(error instanceof Error ? error : undefined)
           if (error instanceof DoubaoUpstreamError && sessionKey !== undefined) bumpFailure(sessionKey)
           if (isContinuationTurn && isInvalidParamFailure(error)) sessions.forget(sessionKey)
-          throw error
+          // Same relabel as the streaming path: an oversized body is the host's
+          // cue to compact, not an upstream parameter error.
+          throw overflowIfOversized(error, prompt)
         }
         const completedAt = Date.now()
         remember(result.conversationId)

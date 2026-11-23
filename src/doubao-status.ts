@@ -195,12 +195,25 @@ function viewOf(window: QuotaWindow | undefined): QuotaWindowView | null {
   }
 }
 
+const PROFILE_LOCATION_TTL_MS = 5 * 60 * 1000
+let cachedProfile: { at: number; value: string } | undefined
+
+function cachedProfileLocation(): string {
+  const now = Date.now()
+  if (cachedProfile !== undefined && now - cachedProfile.at < PROFILE_LOCATION_TTL_MS) {
+    return cachedProfile.value
+  }
+  const value = describeProfileLocation()
+  cachedProfile = { at: now, value }
+  return value
+}
+
 export async function doubaoQuotaView(options: { force?: boolean } = {}): Promise<DoubaoQuotaView> {
   const quota = await fetchQuota(options.force === true ? { force: true } : {})
   const monthly = findWindow(quota, 'monthly')
   return {
     ok: quota.error === undefined,
-    profile: describeProfileLocation(),
+    profile: cachedProfileLocation(),
     plan: quota.plan ?? null,
     exhausted: quota.exhausted,
     windows: {

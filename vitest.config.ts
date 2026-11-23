@@ -7,6 +7,9 @@ import { defineConfig } from 'vitest/config'
 export default defineConfig({
   test: {
     include: ['tests/**/*.test.ts'],
+    // Isolate the persisted risk-control circuit and throttle from the real
+    // account; see tests/setup-env.ts for why.
+    setupFiles: ['tests/setup-env.ts'],
     exclude: ['**/node_modules/**', '**/lib/**', 'awesome-dsh-plugin/**', '.pr/**'],
   },
 })

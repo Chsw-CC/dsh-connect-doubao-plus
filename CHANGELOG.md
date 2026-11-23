@@ -5,6 +5,38 @@
 ---
 
 ## 0.15.0 — 2026-11-22
+## 0.8.1 — 2026-11-23
+
+> 让**所有用户**都能正常用：网页身份不再需要手动配置——扫码登录时自动抓取，老用户一条命令补上。同时把 `710022004` 风控的恢复路径做成命令，并把「本地熔断」与「服务端风控」分开说清楚。
+
+### 新增
+
+- **登录即抓取请求身份**：`browserLogin` 在扫码成功的同一个浏览器窗口里记录 `User-Agent` / `Referer` / `sec-ch-ua` / 完整 query（`aid`、`device_id` …），写入 `~/.dsh/doubao-browser-fingerprint.json`。新用户无需任何额外步骤，且身份与其 cookie 天然同源。
+- **`doctor` 新增 `identity` 检查**：身份缺失或仍是桌面端（UA 带 `SamanthaDoubao`）会明确报出并给出修复命令。
+- **`dsh-connect-doubao-doctor --verify`**：用插件自己的浏览器配置（`~/.dsh/doubao-browser-profile`）打开官方页面，由人完成滑块/扫码。插件不会、也不应自动过滑块。
+- **`dsh-connect-doubao-doctor --resume`**：人工验证完成后清除本地风控熔断，下一轮立即真正发请求（否则要等 60 分钟）。
+- **`dsh-connect-doubao-doctor --relay on|off`**：把普通对话切到官方页面中转（真实浏览器自己签名、自己选模型）；任务模式与生图仍走插件自己的通道。开启前会检查浏览器配置档是否已有登录 cookie。
+- **`dsh-connect-doubao-doctor --fingerprint`**：从官方页面截一条真实请求，把它的 `User-Agent` / `Referer` / `sec-ch-ua` / 完整 query（`aid`、`device_id`、`web_id`、`fp` …）写进 `~/.dsh/doubao-browser-fingerprint.json`，让 Node 直连也用**同一个 web 身份**，而不是"网页 cookie + 桌面端伪装"。只 reload 页面取样，不发消息、不消耗额度；`msToken`/`a_bogus`/`web_tab_id` 会被剔除。
+
+### 修复
+
+- **登录稳定性与浏览器兼容**（`doubao-auth` / `doubao-auth-browser`）：
+  - DPAPI 加解密改为优先使用内置 `System.Security.Cryptography.ProtectedData`（`-EncodedCommand`，免去 `%TEMP%` 临时脚本与 `csc.exe` 动态编译，降低被杀毒/策略拦截概率），失败时仍保留原生 `crypt32.dll` P/Invoke 兜底，并补齐子进程所需的 `APPDATA`/`LOCALAPPDATA` 等系统变量。
+  - 修复登录等待与读取对 cookie 集合要求不一致的问题：登录捕获阶段会短暂等待并二次读取辅助 cookie，而读取会话仅强制要求核心认证 cookie（`sessionid` / `sessionid_ss` / `sid_tt` / `uid_tt`），避免个别浏览器因辅助跟踪 cookie 未到位而刚扫码就报“还没有浏览器登录态”。
+  - 浏览器查找补充用户级 `%LOCALAPPDATA%` 与注册表 `App Paths` 路径；登录改用动态空闲调试端口避开 `9333` 冲突；启动时检测到配置档内旧会话已失效或残缺会自动清理后重新展示登录页；用户主动关闭登录窗也会立即结束等待；重登录成功同时清理内存中的旋转 cookie 缓存（`invalidateRenewals`）。
+- **额度读取与状态展示不再误报“会话无法解密”**（`doubao-quota` / `doubao-status` / `DoubaoQuotaCard` / `contract`）：
+  - 区分“正在读取额度”（`loading`）、“尚未登录”（`signed_out`）、“路由/网络异常”（`network`）与真正的“DPAPI 解密失败”（`unreadable`）：额度请求未返回或接口报错时不再一律展示“本机保存的会话无法解密，请重新登录一次”，并把真实失败原因显示在额度区。
+  - `fetchQuota` 增加 15 秒请求超时、检查 HTTP 200 业务错误码（`710012001` / `710022004` 等）及空 `data`，并把 401/403 归类为 `session_dead`；卡片内额度与统计改为独立并发请求，避免慢网络阻塞统计面板；刷新失败时保留已展示的额度而非清空重置；接口目录探测结果在状态路由内做短缓存，避免无桌面端用户每次轮询阻塞数秒。
+- **本地熔断不再冒充服务端风控**：`DoubaoUpstreamError.local` 标记「这一轮根本没发出去」，文案指向 `--resume`；真正的滑块风控才指向 `--verify`。此前两者共用一句「被风控了」，用户会去网页找一个不存在的验证。
+- **测试与真实账号状态隔离**（`tests/setup-env.ts`）：熔断状态与 8 秒请求间隔都是生产默认值且持久化，机器上真实命中一次 `710022004` 就会让 `npm run check` 出现 13 个红。现在测试单独注入状态，全量用例与账号状态无关；`DoubaoShim` 也透传自定义 `resolveCredentials` 供隔离测试使用。
+
+### 文档
+
+- **`docs/RISK-CONTROL.md`**：`710022004` 的证据链、触发面（桌面/网页身份错配、写死的共享设备指纹、Node 与 Chrome 的传输层差异）、不能做的事（自动过验证码），以及现在的操作顺序。
+
+---
+
+## 0.8.0 — 2026-11-21
 
 > 同步上游 0.8.0：**「工作任务」模式真正接上 DSH 的工作区工具**。此前任务模式只要请求带工具就整体拒绝，DSH 在该模式下读写不了任何文件；这一版把任务运行时下发的工作区命令桥接成本次请求已声明的 DSH 工具调用，由宿主执行，`finish_reason` 正确变为 `tool_calls`。
 

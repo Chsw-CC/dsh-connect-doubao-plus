@@ -32,6 +32,20 @@
 import { existsSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+
+/**
+ * The home directory this plugin resolves its own paths against.
+ *
+ * `os.homedir()` settles the environment once per thread on Windows, so a caller
+ * that redirects HOME / USERPROFILE (a test, or a wrapper sandboxing the host)
+ * keeps getting the ORIGINAL home: a sealed session would be written and read in
+ * two different places. Reading the environment here keeps that redirect working
+ * on every platform and falls back to the cached value when neither is set.
+ */
+export function homeDir(): string {
+  const fromEnv = process.env.USERPROFILE ?? process.env.HOME
+  return fromEnv !== undefined && fromEnv !== '' ? fromEnv : homedir()
+}
 import { spawnSync } from 'node:child_process'
 
 /** Where a candidate path came from. Reported by `doctor` so failures are diagnosable. */
@@ -194,7 +208,7 @@ function defaultAppDataBases(env: NodeJS.ProcessEnv): string[] {
   // with no `User Data` level. Only added off-Windows: on Windows the same
   // folder name would be a stray path under a non-existent Library tree.
   if (process.platform !== 'win32') {
-    candidates.push(join(homedir(), 'Library', 'Application Support', 'Doubao'))
+    candidates.push(join(homeDir(), 'Library', 'Application Support', 'Doubao'))
   }
   // Roaming first, then every other user's Local: a second account on the same
   // machine is a real setup, and `C:\Users` is cheap to list.

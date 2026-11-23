@@ -31,8 +31,9 @@
  * @module dsh-connect-doubao-plus/auth
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, rmSync, mkdtempSync } from 'node:fs'
-import { tmpdir, homedir } from 'node:os'
+import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
+import { homeDir } from './doubao-profile.ts'
 import { spawnSync } from 'node:child_process'
 import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto'
 
@@ -58,7 +59,23 @@ export interface DoubaoCredentials {
 export const CREDENTIAL_TTL_MS = 10 * 60 * 1000
 
 /**
- * Cookie names Doubao's chat backend actually needs for authentication.
+ * Core cookie names Doubao actually requires to authenticate an account.
+ *
+ * `browserLogin()` still waits briefly for the full 9-cookie jar below so
+ * anti-bot and expiry cookies (`sid_guard`, `ttwid`, `s_v_web_id`, ...) are
+ * captured whenever issued, while `loadBrowserCredentials()` will not discard an
+ * otherwise working session merely because an auxiliary tracking cookie was
+ * blocked or delayed on a user's machine.
+ */
+export const CORE_AUTH_COOKIE_NAMES = [
+  'sessionid',
+  'sessionid_ss',
+  'sid_tt',
+  'uid_tt',
+] as const
+
+/**
+ * Full cookie set Doubao's web/client stack normally sets.
  * Verified in M1/M2: this exact set authenticated while the app was closed.
  */
 export const REQUIRED_COOKIE_NAMES = [
@@ -104,7 +121,23 @@ function powershellPath(): string {
  */
 function dpapiChildEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {}
-  for (const name of ['SystemRoot', 'windir', 'SystemDrive', 'ComSpec', 'PATH', 'PATHEXT', 'TEMP', 'TMP', 'USERPROFILE']) {
+  for (const name of [
+    'SystemRoot',
+    'windir',
+    'SystemDrive',
+    'ComSpec',
+    'PATH',
+    'PATHEXT',
+    'TEMP',
+    'TMP',
+    'USERPROFILE',
+    'APPDATA',
+    'LOCALAPPDATA',
+    'HOMEDRIVE',
+    'HOMEPATH',
+    'OS',
+    'PROCESSOR_ARCHITECTURE',
+  ]) {
     const value = process.env[name]
     if (value !== undefined) env[name] = value
   }
@@ -112,14 +145,89 @@ function dpapiChildEnv(): NodeJS.ProcessEnv {
   return env
 }
 
+const DPAPI_OK_PREFIX = 'DSH_DPAPI_OK:'
+const BASE64_OUTPUT = /^[A-Za-z0-9+/]+={0,2}$/
+
+class DpapiBlobRejectedError extends Error {
+  constructor() {
+    super('Windows DPAPI rejected the blob (CryptUnprotectData returned false)')
+  }
+}
+
+function parseDpapiStdout(result: { status: number | null; stdout: string | null; stderr: string | null; error?: Error }): Buffer {
+  if (result.error !== undefined) {
+    throw new Error(`Windows DPAPI helper failed to start: ${result.error.message}`)
+  }
+  const stdout = result.stdout ?? ''
+  if (stdout.trim() === '') {
+    const stderr = result.stderr ?? ''
+    throw new Error(
+      `Windows DPAPI helper produced no output (status=${result.status}, ` +
+      `stdout=${JSON.stringify(stdout.slice(0, 120))}, ` +
+      `stderr=${JSON.stringify(stderr.slice(-400))})`,
+    )
+  }
+  for (const line of stdout.split(/\r?\n/).reverse()) {
+    const candidate = line.trim()
+    if (!candidate || candidate.startsWith('#') || candidate.startsWith('<')) continue
+    if (candidate === 'DPAPI_CALL_FAILED') {
+      throw new DpapiBlobRejectedError()
+    }
+    const payload = candidate.startsWith(DPAPI_OK_PREFIX)
+      ? candidate.slice(DPAPI_OK_PREFIX.length)
+      : candidate
+    if (!BASE64_OUTPUT.test(payload) || payload.length % 4 !== 0) continue
+    const decoded = Buffer.from(payload, 'base64')
+    if (decoded.length > 0) return decoded
+  }
+  const stderr = result.stderr ?? ''
+  throw new Error(
+    `DPAPI helper returned no usable output (status=${result.status}, stderr=${JSON.stringify(stderr.slice(-300))})`,
+  )
+}
+
 /**
- * Call CryptProtectData / CryptUnprotectData via a short-lived PowerShell child.
- *
- * Node has no built-in DPAPI binding and the plugin must not pull in a native
- * addon, so we shell out to the Windows Data Protection API. The payload travels
- * over stdin and stdout and never touches disk.
+ * Primary DPAPI path using the signed built-in .NET `System.Security` assembly
+ * via `-EncodedCommand`: avoids `csc.exe` runtime compilation and temp `.ps1`
+ * files, which antivirus / ConstrainedLanguage / AllSigned GPOs often block.
  */
-function dpapiCall(mode: 'protect' | 'unprotect', blob: Buffer): Buffer {
+function dpapiCallProtectedData(mode: 'protect' | 'unprotect', blob: Buffer): Buffer {
+  const op = mode === 'protect' ? 'Protect' : 'Unprotect'
+  const ps = [
+    "$ErrorActionPreference = 'Stop'",
+    "$ProgressPreference = 'SilentlyContinue'",
+    'Add-Type -AssemblyName System.Security',
+    '$in = [Console]::In.ReadToEnd()',
+    '$bytes = [System.Convert]::FromBase64String($in.Trim())',
+    '$scope = [System.Security.Cryptography.DataProtectionScope]::CurrentUser',
+    'try {',
+    `  $out = [System.Security.Cryptography.ProtectedData]::${op}($bytes, $null, $scope)`,
+    '} catch [System.Security.Cryptography.CryptographicException] {',
+    "  [Console]::Out.Write('DPAPI_CALL_FAILED')",
+    '  exit 3',
+    '}',
+    `[Console]::Out.Write('${DPAPI_OK_PREFIX}' + [System.Convert]::ToBase64String($out))`,
+  ].join('\r\n')
+  const encoded = Buffer.from(ps, 'utf16le').toString('base64')
+  const result = spawnSync(
+    powershellPath(),
+    ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+    {
+      encoding: 'utf8',
+      maxBuffer: 1 << 24,
+      windowsHide: true,
+      input: blob.toString('base64'),
+      env: dpapiChildEnv(),
+    },
+  )
+  return parseDpapiStdout(result)
+}
+
+/**
+ * Fallback DPAPI path calling `crypt32.dll` directly via P/Invoke in a temp script.
+ * Used only if `System.Security.Cryptography.ProtectedData` could not be loaded.
+ */
+function dpapiCallNative(mode: 'protect' | 'unprotect', blob: Buffer): Buffer {
   // The script is written to a temp .ps1 and run with `-File`, not passed via
   // -Command/-EncodedCommand: the C# P/Invoke source needs real newlines, and
   // any inline form flattens the here-string header into a parse error.
@@ -164,7 +272,7 @@ function dpapiCall(mode: 'protect' | 'unprotect', blob: Buffer): Buffer {
     "if (-not $ok) { [Console]::Out.Write('DPAPI_CALL_FAILED'); exit 3 }",
     '$res = New-Object byte[] $outBlob.cbData',
     '[Runtime.InteropServices.Marshal]::Copy($outBlob.pbData, $res, 0, $outBlob.cbData)',
-    '[Console]::Out.Write([System.Convert]::ToBase64String($res))',
+    `[Console]::Out.Write('${DPAPI_OK_PREFIX}' + [System.Convert]::ToBase64String($res))`,
     '',
   ].join('\r\n')
 
@@ -189,27 +297,25 @@ function dpapiCall(mode: 'protect' | 'unprotect', blob: Buffer): Buffer {
         env: dpapiChildEnv(),
       },
     )
-    const stdout = result.stdout ?? ''
-    if (stdout.trim() === '') {
-      const stderr = result.stderr ?? ''
-      throw new Error(
-        `Windows DPAPI helper produced no output (status=${result.status}, ` +
-        `stdout=${JSON.stringify(stdout.slice(0, 120))}, ` +
-        `stderr=${JSON.stringify(stderr.slice(-400))})`,
-      )
-    }
-    for (const line of stdout.split(/\r?\n/).reverse()) {
-      const candidate = line.trim()
-      if (!candidate || candidate.startsWith('#') || candidate.startsWith('<')) continue
-      if (candidate === 'DPAPI_CALL_FAILED') {
-        throw new Error('Windows DPAPI rejected the blob (CryptUnprotectData returned false)')
-      }
-      const decoded = Buffer.from(candidate, 'base64')
-      if (decoded.length > 0) return decoded
-    }
-    throw new Error('DPAPI helper returned no usable output')
+    return parseDpapiStdout(result)
   } finally {
     rmSync(scratch, { recursive: true, force: true })
+  }
+}
+
+/**
+ * Call CryptProtectData / CryptUnprotectData via a short-lived PowerShell child.
+ *
+ * Node has no built-in DPAPI binding and the plugin must not pull in a native
+ * addon, so we shell out to the Windows Data Protection API. The payload travels
+ * over stdin and stdout and never touches disk.
+ */
+function dpapiCall(mode: 'protect' | 'unprotect', blob: Buffer): Buffer {
+  try {
+    return dpapiCallProtectedData(mode, blob)
+  } catch (error: unknown) {
+    if (error instanceof DpapiBlobRejectedError) throw error
+    return dpapiCallNative(mode, blob)
   }
 }
 
@@ -237,7 +343,7 @@ const SEAL_IV_BYTES = 12
 const SEAL_TAG_BYTES = 16
 
 function sealKeyPath(): string {
-  return join(homedir(), '.dsh', SEAL_KEY_FILENAME)
+  return join(homeDir(), '.dsh', SEAL_KEY_FILENAME)
 }
 
 /** Read the local key, creating it (0600) on first use. */
@@ -295,7 +401,7 @@ function unsealBlob(sealed: Buffer): Buffer {
 const BROWSER_CACHE_FILENAME = 'doubao-credentials-browser.dpapi'
 
 function browserCachePath(): string {
-  return join(homedir(), '.dsh', BROWSER_CACHE_FILENAME)
+  return join(homeDir(), '.dsh', BROWSER_CACHE_FILENAME)
 }
 
 /** Seal browser-harvested cookies to disk. Throws if sealing fails. */
@@ -312,29 +418,73 @@ export function saveBrowserCredentials(pairs: Map<string, string>): void {
   writeFileSync(browserCachePath(), sealed, { mode: 0o600 })
 }
 
+/** Read the sealed browser session along with a failure diagnosis when unusable. */
+function readBrowserCredentials():
+  | { ok: true; credentials: DoubaoCredentials }
+  | { ok: false; kind: 'missing' | 'dpapi' | 'incomplete'; reason: string } {
+  let sealed: Buffer
+  try {
+    sealed = readFileSync(browserCachePath())
+  } catch (error: unknown) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code
+    if (code === 'ENOENT') {
+      return {
+        ok: false,
+        kind: 'missing',
+        reason: '还没有浏览器登录态。请在豆包卡片里点「重新登录」扫码一次。',
+      }
+    }
+    return {
+      ok: false,
+      kind: 'dpapi',
+      reason: `本机保存的会话无法读取（${(error as Error)?.message ?? String(error)}），请重新登录一次。`,
+    }
+  }
+
+  let parsed: { header?: unknown; pairs?: unknown }
+  try {
+    const json = unsealBlob(sealed).toString('utf8')
+    parsed = JSON.parse(json) as { header?: unknown; pairs?: unknown }
+  } catch (error: unknown) {
+    return {
+      ok: false,
+      kind: 'dpapi',
+      reason: `本机保存的会话无法解密（${(error as Error)?.message ?? String(error)}），请重新登录一次。`,
+    }
+  }
+
+  if (typeof parsed.header !== 'string' || !Array.isArray(parsed.pairs)) {
+    return {
+      ok: false,
+      kind: 'dpapi',
+      reason: '本机保存的会话格式损坏（无法解密），请重新登录一次。',
+    }
+  }
+  const pairs = new Map<string, string>()
+  for (const entry of parsed.pairs) {
+    if (!Array.isArray(entry) || entry.length !== 2) continue
+    const [name, value] = entry as [unknown, unknown]
+    if (typeof name === 'string' && typeof value === 'string' && name !== '') pairs.set(name, value)
+  }
+  const missingCore = CORE_AUTH_COOKIE_NAMES.filter((name) => !pairs.get(name))
+  // A file that decrypts but lacks a core auth cookie is a HALF session: the
+  // scan was abandoned mid-flow or the server rotated part of the jar. Serving
+  // it would fail upstream with a message about the account, not about the
+  // login, so treat it as absent and let the card ask for a fresh scan.
+  if (missingCore.length > 0) {
+    return {
+      ok: false,
+      kind: 'incomplete',
+      reason: `登录态不完整（缺少 ${missingCore.join(', ')}），请在豆包卡片里点「重新登录」重新扫码。`,
+    }
+  }
+  return { ok: true, credentials: { ok: true, header: parsed.header, pairs } }
+}
+
 /** Read the sealed browser session, or `undefined` when absent/unusable. */
 export function loadBrowserCredentials(): DoubaoCredentials | undefined {
-  try {
-    const sealed = readFileSync(browserCachePath())
-    const json = unsealBlob(sealed).toString('utf8')
-    const parsed = JSON.parse(json) as { header?: unknown; pairs?: unknown }
-    if (typeof parsed.header !== 'string' || !Array.isArray(parsed.pairs)) return undefined
-    const pairs = new Map<string, string>()
-    for (const entry of parsed.pairs) {
-      if (!Array.isArray(entry) || entry.length !== 2) continue
-      const [name, value] = entry as [unknown, unknown]
-      if (typeof name === 'string' && typeof value === 'string' && name !== '') pairs.set(name, value)
-    }
-    const missing = REQUIRED_COOKIE_NAMES.filter((name) => !pairs.get(name))
-    // A file that decrypts but lacks a required cookie is a HALF session: the
-    // scan was abandoned mid-flow or the server rotated part of the jar. Serving
-    // it would fail upstream with a message about the account, not about the
-    // login, so treat it as absent and let the card ask for a fresh scan.
-    if (missing.length > 0) return undefined
-    return { ok: true, header: parsed.header, pairs }
-  } catch {
-    return undefined
-  }
+  const result = readBrowserCredentials()
+  return result.ok ? result.credentials : undefined
 }
 
 /** True when a sealed browser session exists on disk. */
@@ -378,7 +528,8 @@ export {
  * Public entry point
  * ------------------------------------------------------------------ */
 
-let cached: { at: number; credentials: DoubaoCredentials } | undefined
+const DPAPI_FAILURE_CACHE_TTL_MS = 15_000
+let cached: { at: number; credentials: DoubaoCredentials; ttlMs: number } | undefined
 
 /**
  * The session this plugin runs on: the sealed browser sign-in, or a failure that
@@ -388,23 +539,32 @@ let cached: { at: number; credentials: DoubaoCredentials } | undefined
  * PowerShell child process. A failure is reported as `{ ok: false, reason }`
  * rather than thrown so the provider can surface an actionable message instead
  * of a stack trace; the login route drops this cache, so a fresh scan is visible
- * immediately.
+ * immediately. Missing-file (`ENOENT`) reads are cheap and never cached, so a
+ * CLI sign-in is picked up immediately without a restart.
  */
 export function loadDoubaoCredentials(options: { force?: boolean } = {}): DoubaoCredentials {
   const now = Date.now()
-  if (!options.force && cached !== undefined && now - cached.at < CREDENTIAL_TTL_MS) {
+  if (!options.force && cached !== undefined && now - cached.at < cached.ttlMs) {
     return cached.credentials
   }
 
-  const sealed = loadBrowserCredentials()
-  const credentials: DoubaoCredentials = sealed ?? {
-    ok: false,
-    reason: '还没有浏览器登录态。请在豆包卡片里点「重新登录」扫码一次。',
-    header: '',
-    pairs: new Map(),
-  }
+  const read = readBrowserCredentials()
+  const credentials: DoubaoCredentials = read.ok
+    ? read.credentials
+    : {
+        ok: false,
+        reason: read.reason,
+        header: '',
+        pairs: new Map(),
+      }
 
-  cached = { at: now, credentials }
+  if (read.ok) {
+    cached = { at: now, credentials, ttlMs: CREDENTIAL_TTL_MS }
+  } else if (read.kind === 'dpapi') {
+    cached = { at: now, credentials, ttlMs: DPAPI_FAILURE_CACHE_TTL_MS }
+  } else {
+    cached = undefined
+  }
   return credentials
 }
 

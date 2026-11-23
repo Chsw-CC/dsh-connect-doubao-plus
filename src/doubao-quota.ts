@@ -20,7 +20,7 @@
  * The window length was confirmed arithmetically from the server's own
  * timestamps rather than inferred from the UI, so the mapping is pinned.
  */
-import { loadDoubaoCredentials } from './doubao-auth.ts'
+import { loadDoubaoCredentials, type DoubaoCredentials } from './doubao-auth.ts'
 import { buildHeaders, buildQueryUrl, QUOTA_ENDPOINT } from './doubao-upstream.ts'
 
 /** Quota results are cached briefly so a chatty session does not hammer the API. */
@@ -256,12 +256,24 @@ export function evaluateQuotaExhausted(data: RawQuotaData | undefined): boolean 
   return flags.length > 0 && flags.every(Boolean)
 }
 
-export async function fetchQuota(options: { force?: boolean } = {}): Promise<DoubaoQuota> {
+function combineSignals(a: AbortSignal | undefined, b: AbortSignal | undefined): AbortSignal | undefined {
+  if (a === undefined) return b
+  if (b === undefined) return a
+  const anyFn = (AbortSignal as { any?: (signals: AbortSignal[]) => AbortSignal }).any
+  return typeof anyFn === 'function' ? anyFn([a, b]) : a
+}
+
+export async function fetchQuota(
+  options: { force?: boolean; credentials?: DoubaoCredentials; signal?: AbortSignal } = {},
+): Promise<DoubaoQuota> {
   const now = Date.now()
-  if (!options.force && cached && now - cached.fetchedAt < QUOTA_TTL_MS) {
+  // An explicit credential set means "do not touch the shared cache": the caller
+  // is probing an identity the process is not currently running on.
+  const useCache = options.credentials === undefined
+  if (useCache && !options.force && cached && now - cached.fetchedAt < QUOTA_TTL_MS) {
     return cached
   }
-  if (!options.force && cachedFailure !== undefined && now - cachedFailureAt < QUOTA_FAILURE_TTL_MS) {
+  if (useCache && !options.force && cachedFailure !== undefined && now - cachedFailureAt < QUOTA_FAILURE_TTL_MS) {
     return cachedFailure
   }
   // Single-flight. The cache is only written once a response LANDS, so the
@@ -269,9 +281,15 @@ export async function fetchQuota(options: { force?: boolean } = {}): Promise<Dou
   // refreshing while a turn begins) used to be one request per caller to the
   // same endpoint. Coalescing them is free: the answer is identical for every
   // caller inside QUOTA_TTL_MS anyway.
-  if (inFlight !== undefined) return inFlight
+  //
+  // Only a cache-backed read may join: a caller that brought its own credentials
+  // or its own signal is asking a different question, and sharing an answer —
+  // or someone else's abort — would be wrong.
+  const shareable = useCache && options.signal === undefined
+  if (shareable && inFlight !== undefined) return inFlight
   const generation = quotaGeneration
-  const run = requestQuota(now, generation)
+  const run = requestQuota(now, generation, options)
+  if (!shareable) return await run
   inFlight = run
   try {
     return await run
@@ -297,38 +315,74 @@ export function peekQuota(now = Date.now()): DoubaoQuota | undefined {
 }
 
 /** One uncached read. Never throws; every exit path returns a memoised failure. */
-async function requestQuota(now: number, generation: number): Promise<DoubaoQuota> {
-  const credentials = loadDoubaoCredentials()
+async function requestQuota(
+  now: number,
+  generation: number,
+  options: { credentials?: DoubaoCredentials; signal?: AbortSignal },
+): Promise<DoubaoQuota> {
+  const credentials = options.credentials ?? loadDoubaoCredentials()
   if (!credentials.ok) {
     return rememberFailure({
       exhausted: false,
       windows: [],
       fetchedAt: now,
-      error: credentials.reason ?? 'Doubao credentials unavailable.',
+      error: credentials.reason ?? '还没有浏览器登录态。请在豆包卡片里点「重新登录」扫码一次。',
     }, generation)
   }
 
   try {
+    // Without this a stalled endpoint holds the turn open until the OS gives
+    // up on the socket — the quota read sits on the critical path of EVERY
+    // chat request, so its worst case is the request's worst case. The caller's
+    // own signal (a client that went away) composes with it.
+    const timeoutSignal = typeof AbortSignal.timeout === 'function'
+      ? AbortSignal.timeout(QUOTA_REQUEST_TIMEOUT_MS)
+      : undefined
+    const signal = combineSignals(options.signal, timeoutSignal)
     const response = await fetch(buildQueryUrl(QUOTA_ENDPOINT, credentials.pairs.get('msToken')), {
       method: 'POST',
       headers: buildHeaders(credentials, { 'content-type': 'application/json' }),
       body: JSON.stringify({ product_line: 'membership' }),
-      // Without this a stalled endpoint holds the turn open until the OS gives
-      // up on the socket — the quota read sits on the critical path of EVERY
-      // chat request, so its worst case is the request's worst case.
-      signal: AbortSignal.timeout(QUOTA_REQUEST_TIMEOUT_MS),
+      ...(signal === undefined ? {} : { signal }),
     })
     if (!response.ok) {
-      return rememberFailure({ exhausted: false, windows: [], fetchedAt: now, error: `HTTP ${response.status}` }, generation)
+      const error = response.status === 401 || response.status === 403
+        ? `HTTP ${response.status} (session rejected)`
+        : `HTTP ${response.status}`
+      return rememberFailure({ exhausted: false, windows: [], fetchedAt: now, error }, generation)
     }
-    const payload = (await response.json()) as { data?: RawQuotaData }
+    // The endpoint answers 200 with a business code for the cases that matter
+    // (a rotated session, a risk-control challenge), so the body is checked
+    // before it is trusted.
+    const payload = (await response.json()) as {
+      code?: unknown
+      msg?: unknown
+      message?: unknown
+      data?: RawQuotaData | null
+    }
+    if (typeof payload.code === 'number' && payload.code !== 0) {
+      const msg = typeof payload.msg === 'string' && payload.msg !== ''
+        ? payload.msg
+        : typeof payload.message === 'string'
+          ? payload.message
+          : ''
+      const error = payload.code === 710012001
+        ? `Doubao session rejected (710012001)${msg ? `: ${msg}` : ''}`
+        : payload.code === 710022004
+          ? `Doubao risk challenge (710022004)${msg ? `: ${msg}` : ''}`
+          : `Doubao quota error ${payload.code}${msg ? `: ${msg}` : ''}`
+      return rememberFailure({ exhausted: false, windows: [], fetchedAt: now, error }, generation)
+    }
+    if (payload.data === undefined || payload.data === null || typeof payload.data !== 'object') {
+      return rememberFailure({ exhausted: false, windows: [], fetchedAt: now, error: 'Doubao quota response missing data' }, generation)
+    }
 
     // Two sections, one list: the regular windows and the promotional grants
     // that Doubao shows above them ("活动赠送额度"). Reading only the first
     // section hid the grant that was actually being consumed.
     const sections = [
-      payload.data?.window_limit_section,
-      payload.data?.incentive_quota_section,
+      payload.data.window_limit_section,
+      payload.data.incentive_quota_section,
     ]
     const windows: QuotaWindow[] = []
     for (const section of sections) {
@@ -345,9 +399,9 @@ async function requestQuota(now: number, generation: number): Promise<DoubaoQuot
       windows,
       fetchedAt: now,
     }
-    const plan = payload.data?.current_subscription?.display?.short_name
+    const plan = payload.data.current_subscription?.display?.short_name
     if (plan) quota.plan = plan
-    if (payload.data?.member_info?.hasActiveSubscription !== undefined) {
+    if (payload.data.member_info?.hasActiveSubscription !== undefined) {
       quota.planActive = payload.data.member_info.hasActiveSubscription
     }
 

@@ -112,8 +112,10 @@ describe('session sealing off Windows', () => {
 
 describe('browser lookup off Windows', () => {
   it('keeps the four Windows paths for win32', () => {
-    expect(authBrowserSource).toContain("'C:\\\\Program Files\\\\Google\\\\Chrome\\\\Application\\\\chrome.exe'")
-    expect(authBrowserSource).toContain('process.platform === \'win32\' ? WINDOWS_CANDIDATES : posixCandidates()')
+    // win32 paths moved into browserCandidates(), which covers per-user installs
+    // too; the platform switch is what keeps them off macOS/Linux.
+    expect(authBrowserSource).toContain("'Google', 'Chrome', 'Application', 'chrome.exe'")
+    expect(authBrowserSource).toContain("process.platform === 'win32' ? browserCandidates() : posixCandidates()")
   })
 
   it('has macOS and Linux candidates', () => {

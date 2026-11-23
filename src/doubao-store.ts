@@ -31,7 +31,7 @@
  */
 import { readFileSync, renameSync, writeFileSync, unlinkSync } from 'node:fs'
 import { mkdirSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { homeDir } from './doubao-profile.ts'
 import { dirname, join } from 'node:path'
 import {
   AUTO_CHECKIN_FIELD,
@@ -45,7 +45,7 @@ import {
 
 /** Absolute path of the settings file. Mirrors where the credential cache lives. */
 export function settingsFilePath(): string {
-  return join(homedir(), '.dsh', 'dsh-connect-doubao.settings.json')
+  return join(homeDir(), '.dsh', 'dsh-connect-doubao.settings.json')
 }
 
 /** The subset of a config blob this plugin can persist. */
