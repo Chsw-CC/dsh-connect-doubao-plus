@@ -5,7 +5,7 @@
 > 会话只密封在本机（Windows DPAPI / 其它平台 AES-256-GCM）；Harness 到插件的流量只走 `127.0.0.1`，插件再以你的会话向豆包发起 HTTPS。
 
 [![release](https://img.shields.io/github/v/release/Chsw-CC/dsh-connect-doubao-plus)](https://github.com/Chsw-CC/dsh-connect-doubao-plus/releases)
-[![version](https://img.shields.io/badge/version-0.15.0-blue)](./CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.16.0-blue)](./CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 [![platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](#平台支持)
 [![dshfind](https://img.shields.io/badge/dshmarket-dshfind-blueviolet)](https://dshfind.dev)
@@ -35,8 +35,10 @@
 - **Seedream 生图** —— 端到端打通；图片流式落盘，单图 24 MB、单轮 8 张上限；超限保留远程 URL，不落盘。
 - **额度看板与签到** —— 顶部「可用额度」汇总剩余合计，下面分月度与赠送双窗口、各自倒计时；「天天领额度」一键领取（+200/天），可选每天自动签到（默认关闭，按北京时间日界）。
 - **工具模拟（默认开启）** —— OpenAI `tools` → `doubao-tool` 围栏 → `tool_calls`，让豆包驱动 DSH 本地工具；解析只接受本次请求真正声明的工具，工作区权限与实际执行仍在 Harness 一侧；`toolEmulation: false` 可关。
+- **网页身份随登录抓取** —— 扫码成功的同一个窗口里顺手记下 `User-Agent` / `Referer` / `sec-ch-ua` 与 query（`aid`、`device_id` …），写入 `~/.dsh/doubao-browser-fingerprint.json`；之后直连用同一套身份，避免「网页 cookie + 桌面端伪装」触发 `710022004`。老用户可 `doctor --fingerprint` 补一次。
+- **额度状态如实区分** —— `loading` / `signed_out` / `network` / `unreadable` 分开呈现；额度读取失败时保留上一次读数并显示真实原因，不再一律说「会话无法解密」。
 - **本地闭环** —— 对话走只监听 `127.0.0.1` 的 shim，带每进程共享密钥，非本机请求一律 401；凭据用 DPAPI / AES-256-GCM 密封，进程内缓存 10 分钟。
-- **命令行体检** —— `doctor` 不消耗额度即可核对凭据、账号、shim、额度、模型五项；`probe` 做一次真实对话冒烟。
+- **命令行体检** —— `doctor` 不消耗额度即可核对凭据、账号、shim、额度、模型、身份六项；`probe` 做一次真实对话冒烟。风控相关另有四条：`--fingerprint`（重取网页身份）、`--verify`（打开官方页面人工过验证）、`--resume`（清本地熔断）、`--relay on|off`（普通对话改由官方页面中转；任务模式与生图仍走插件通道）。
 
 ### 0.12.4 实测（本机数据，非跨环境承诺）
 
@@ -64,7 +66,7 @@
 
 ```bash
 # 从 tarball 安装（推荐）
-dsh plugin --profile desktop add "<路径>/dsh-connect-doubao-plus-0.15.0.tgz"
+dsh plugin --profile desktop add "<路径>/dsh-connect-doubao-plus-0.16.0.tgz"
 ```
 
 > 本插件不走 npm registry，也不支持 `dsh plugin add <git 地址>`：`prepack` 需要 `npm`，而 Harness 自带运行时只有 `node`。tarball 与源码目录都由已构建的 `lib/` 直接加载，不需要构建步骤。
