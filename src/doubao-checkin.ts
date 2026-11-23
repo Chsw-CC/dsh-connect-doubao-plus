@@ -26,6 +26,8 @@
  *
  * @module dsh-connect-doubao-plus/checkin
  */
+import { createHash } from 'node:crypto'
+
 import { loadDoubaoCredentials } from './doubao-auth.ts'
 import { buildHeaders } from './doubao-upstream.ts'
 
@@ -87,8 +89,21 @@ const CAMPAIGN_PARAMS: Readonly<Record<string, string>> = {
 /** "This cookie is dead" -- distinct from "this account has no such task". */
 const CODE_LOGIN_INVALID = 710012001
 
-/** "Cookie is fine, nothing claimable here" -- the work / Feishu account shape. */
+/**
+ * 710010702 is TWO different answers depending on which endpoint says it.
+ *
+ *   detail -> "这个账号没有每日签到活动" (the work / Feishu account shape): real.
+ *   claim  -> "系统错误" (upstream's own wording): transient, nothing was granted.
+ *
+ * Treating the claim refusal as "no activity" is what silently marked a healthy
+ * account as settled for the whole day: the panel kept showing an unclaimed day
+ * while the scheduler had already gone quiet. Only the detail read may conclude
+ * "no activity"; the claim refusal must stay retryable.
+ */
 const CODE_NO_ACTIVITY = 710010702
+
+/** How long a refused claim is left alone before it is retried, in ms. */
+export const CHECKIN_REFUSAL_COOLDOWN_MS = 60 * 60 * 1000
 
 /** What the card shows. Every value is produced here; nothing is passed through. */
 export type DoubaoCheckinOutcome =
@@ -96,6 +111,19 @@ export type DoubaoCheckinOutcome =
   | 'claimed'
   /** Already claimed today -- by the user, an earlier attempt, or the scheduler. */
   | 'already'
+  /**
+   * Panel read fine, today's grant is still unclaimed. NOT a failure: the button
+   * has work to do. Collapsing this into 'failed' made every healthy account look
+   * broken in the card and made a transient error indistinguishable from "正常待领取".
+   */
+  | 'ready'
+  /**
+   * The panel is readable but upstream refused the claim for now (「系统错误」).
+   * Distinct from 'no_task' (no activity exists) and from 'failed' (transport):
+   * retrying immediately is what upstream asked us not to do, so the scheduler
+   * backs off instead of hammering, and the card stays honest about the panel.
+   */
+  | 'inactive'
   /** The session is gone. Only a fresh QR sign-in fixes it; retrying cannot. */
   | 'needs_login'
   /** Signed in, but this account has no check-in activity (work / Feishu account). */
@@ -173,6 +201,8 @@ type CampaignReply =
   | { kind: 'needs_login'; error: string }
   /** The cookie works but the account has no such activity. */
   | { kind: 'no_task'; error: string }
+  /** Cookie fine, activity exists, upstream declined this particular claim. */
+  | { kind: 'refused'; error: string }
   | { kind: 'failed'; error: string }
 
 /**
@@ -236,6 +266,13 @@ async function postCampaign(
     return { kind: 'needs_login', error: '豆包登录已过期，请重新扫码登录一次' }
   }
   if (code === CODE_NO_ACTIVITY) {
+    // Only the panel read may conclude "this account has no activity". On the
+    // CLAIM endpoint the same code is upstream's 「系统错误」 -- nothing was
+    // granted, and reporting it as no_task would settle the day for an account
+    // that plainly has one. Keep it retryable.
+    if (endpoint === CHECKIN_CLAIM_ENDPOINT) {
+      return { kind: 'refused', error: '豆包签到接口返回 710010702（系统错误），稍后自动重试' }
+    }
     return { kind: 'no_task', error: '这个豆包账号没有每日签到活动（企业 / 飞书账号没有这个玩法）' }
   }
   if (code !== 0) {
@@ -297,17 +334,53 @@ function rewardOf(daily: RawDaily): { amount: number | null; type: string | null
  * Reads
  * ------------------------------------------------------------------ */
 
-let cached: DoubaoCheckinView | undefined
-/** The Beijing day whose grant we already know landed: a status read stays local. */
-let claimedDay: string | undefined
-/** The read on the wire, shared by every caller that asks meanwhile. */
-let inFlight: Promise<DoubaoCheckinView> | undefined
+interface AccountCheckinState {
+  cached?: DoubaoCheckinView | undefined
+  /** The Beijing day whose grant we already know landed: a status read stays local. */
+  claimedDay?: string | undefined
+  /** The read on the wire, shared by every caller that asks meanwhile. */
+  inFlight?: Promise<DoubaoCheckinView> | undefined
+  /**
+   * Epoch ms of the last REFUSED claim, if any.
+   *
+   * Per account on purpose. A shared refusal instant lets one restricted account
+   * silence every other account on the host.
+   */
+  refusedAt?: number | undefined
+}
 
-/** Forget the cache. Used by the card's claim and by tests. */
+const states = new Map<string, AccountCheckinState>()
+
+/**
+ * Which account a piece of state belongs to, derived from the live session.
+ *
+ * The id is hashed rather than stored: nothing here should name an account, and a
+ * re-login of the SAME account must keep its settled day. With no session there is
+ * no account, and the shared bucket is correct -- every such caller answers
+ * needs_login anyway.
+ */
+function accountStateKey(): string {
+  const credentials = loadDoubaoCredentials()
+  const id = credentials.ok
+    ? (credentials.pairs.get('uid_tt') ?? credentials.pairs.get('sessionid'))
+    : undefined
+  if (id === undefined || id === '') return 'anonymous'
+  return createHash('sha256').update(id).digest('hex').slice(0, 16)
+}
+
+function stateOf(): AccountCheckinState {
+  const key = accountStateKey()
+  let state = states.get(key)
+  if (state === undefined) {
+    state = {}
+    states.set(key, state)
+  }
+  return state
+}
+
+/** Forget every account's cache. Used by sign-out, the card's claim, and tests. */
 export function invalidateCheckinCache(): void {
-  cached = undefined
-  claimedDay = undefined
-  inFlight = undefined
+  states.clear()
 }
 
 function view(
@@ -316,7 +389,7 @@ function view(
   extra: Partial<DoubaoCheckinView> = {},
 ): DoubaoCheckinView {
   return {
-    ok: outcome === 'claimed' || outcome === 'already',
+    ok: outcome === 'claimed' || outcome === 'already' || outcome === 'ready',
     outcome,
     continuousDays: null,
     checkedInToday: null,
@@ -339,11 +412,16 @@ export async function readDoubaoCheckin(
 
   // A grant this process landed itself needs no confirmation for the rest of the
   // day: the server is idempotent, so re-reading could only agree.
-  if (options.force !== true && claimedDay === day && cached !== undefined) return cached
-  if (options.force !== true && cached !== undefined && now - cached.fetchedAt < CHECKIN_STATUS_TTL_MS) {
-    return cached
+  const state = stateOf()
+  if (options.force !== true && state.claimedDay === day && state.cached !== undefined) return state.cached
+  if (
+    options.force !== true
+    && state.cached !== undefined
+    && now - state.cached.fetchedAt < CHECKIN_STATUS_TTL_MS
+  ) {
+    return state.cached
   }
-  if (inFlight !== undefined) return inFlight
+  if (state.inFlight !== undefined) return state.inFlight
 
   const run = (async (): Promise<DoubaoCheckinView> => {
     const reply = await postCampaign(CHECKIN_DETAIL_ENDPOINT, {
@@ -352,6 +430,9 @@ export async function readDoubaoCheckin(
     if (reply.kind === 'needs_login') return view('needs_login', day, { error: reply.error })
     if (reply.kind === 'no_task') return view('no_task', day, { error: reply.error })
     if (reply.kind === 'failed') return view('failed', day, { error: reply.error })
+    // A refusal is only ever produced for the claim endpoint, so it cannot reach
+    // here; narrowing it keeps the body access total.
+    if (reply.kind === 'refused') return view('failed', day, { error: reply.error })
 
     const daily = dailyOf(reply.body)
     if (daily === undefined) {
@@ -362,28 +443,28 @@ export async function readDoubaoCheckin(
     const reward = rewardOf(daily)
     const checkedInToday = daily.checked_in_today === true
     const progress = reply.body.progress
-    return view(checkedInToday ? 'already' : 'failed', day, {
+    return view(checkedInToday ? 'already' : 'ready', day, {
       continuousDays: numberOf(daily.continuous_days),
       checkedInToday,
       rewardAmount: reward.amount,
       rewardType: reward.type,
       totalAmount: numberOf(progress !== null && typeof progress === 'object' ? (progress as { total_amount?: unknown }).total_amount : undefined),
-      // "Not claimed yet" is not a failure: the panel simply has nothing to
-      // report until the button (or the scheduler) fires.
-      error: checkedInToday ? null : '今日还未领取',
+      // An unclaimed day is a normal, healthy state -- 'ready' is ok, so it carries
+      // no error line. The card's button already says 领取.
+      error: null,
     })
   })()
 
-  inFlight = run
+  state.inFlight = run
   try {
     const result = await run
     // Only a SUCCESSFUL read is worth memoising: caching a failure would pin
     // "needs login" or "no activity" for a minute after the user fixed it, which
     // is the silent-revert shape this plugin has been bitten by before.
-    if (result.ok) cached = result
+    if (result.ok) state.cached = result
     return result
   } finally {
-    if (inFlight === run) inFlight = undefined
+    if (state.inFlight === run) state.inFlight = undefined
   }
 }
 
@@ -395,13 +476,38 @@ export async function readDoubaoCheckin(
  * round trips per click. The follow-up read is best-effort enrichment (streak,
  * lifetime total) and its failure must not turn a successful claim into an
  * error.
+ *
+ * A REFUSAL is not a result. Upstream answering 「系统错误」 to the claim says
+ * nothing about whether today's grant exists -- the panel is the only authority
+ * on that, and it may be read again. Callers that must not hammer pass
+ * `{ respectCooldown: true }` (the scheduler does).
  */
-export async function claimDoubaoCheckin(): Promise<DoubaoCheckinView> {
+export async function claimDoubaoCheckin(
+  options: { respectCooldown?: boolean } = {},
+): Promise<DoubaoCheckinView> {
   const day = beijingDayKey()
+  const state = stateOf()
+  if (
+    options.respectCooldown === true
+    && state.refusedAt !== undefined
+    && Date.now() - state.refusedAt < CHECKIN_REFUSAL_COOLDOWN_MS
+  ) {
+    return view('inactive', day, {
+      checkedInToday: false,
+      error: `豆包刚刚拒绝了领取，冷却中，稍后自动再试（北京时间 ${day}）`,
+    })
+  }
+
   const reply = await postCampaign(CHECKIN_CLAIM_ENDPOINT, { scene: CHECKIN_CAMPAIGN_GROUP })
   if (reply.kind === 'needs_login') return view('needs_login', day, { error: reply.error })
   if (reply.kind === 'no_task') return view('no_task', day, { error: reply.error })
   if (reply.kind === 'failed') return view('failed', day, { error: reply.error })
+  if (reply.kind === 'refused') {
+    // Remember WHEN, not "never": the cooldown belongs to this account alone, and
+    // the attempt after it is allowed to succeed.
+    state.refusedAt = Date.now()
+    return view('inactive', day, { checkedInToday: false, error: reply.error })
+  }
 
   const outcome: DoubaoCheckinOutcome = reply.body.idempotent === true ? 'already' : 'claimed'
   const granted = numberOf(reply.body.reward_amount)
@@ -417,8 +523,8 @@ export async function claimDoubaoCheckin(): Promise<DoubaoCheckinView> {
     rewardType: enriched?.rewardType ?? 'quota_grant',
     totalAmount: enriched?.totalAmount ?? null,
   })
-  cached = result
-  if (result.ok) claimedDay = day
+  state.cached = result
+  if (result.ok) state.claimedDay = day
   return result
 }
 
@@ -446,6 +552,13 @@ export interface DoubaoAutoCheckinHandle {
  *   - disabled       -> no request at all
  *   - settled today  -> claimed / already / needs_login / no_task are not retried
  *   - failed         -> RETRIED on the next tick, because that is usually transient
+ *   - inactive       -> RETRIED after CHECKIN_REFUSAL_COOLDOWN_MS, because a refusal
+ *                       says nothing about whether the grant exists
+ *   - ready          -> RETRIED on the next tick, because the grant is still there
+ *
+ * Settlement is PER ACCOUNT. Signing in as a second account used to inherit the
+ * first account's "done today" and silently skip its claim -- a missing reward,
+ * not a cosmetic bug.
  *
  * `needs_login` is deliberately settled: no amount of retrying mints a session,
  * and an hourly failure would only bury the one message that tells the user what
@@ -459,7 +572,8 @@ export function startDoubaoAutoCheckin(deps: {
 }): DoubaoAutoCheckinHandle {
   const tickMs = deps.tickMs ?? CHECKIN_TICK_MS
   const firstTickMs = deps.firstTickMs ?? CHECKIN_FIRST_TICK_MS
-  let settledDay: string | undefined
+  /** Account key -> Beijing day that account is done with. */
+  const settled = new Map<string, string>()
   let stopped = false
   let timer: ReturnType<typeof setTimeout> | undefined
 
@@ -467,15 +581,19 @@ export function startDoubaoAutoCheckin(deps: {
     if (stopped) return null
     if (!deps.enabled()) return null
     const day = beijingDayKey()
-    if (settledDay === day) return null
+    const account = accountStateKey()
+    if (settled.get(account) === day) return null
 
-    const result = await claimDoubaoCheckin().catch(
+    const result = await claimDoubaoCheckin({ respectCooldown: true }).catch(
       () => view('failed', day, { error: 'claim threw' }),
     )
     deps.onResult?.(result)
-    // 'failed' stays unsettled on purpose: a transport blip must not cost the
-    // day's grant, so the next tick tries again.
-    if (result.outcome !== 'failed') settledDay = day
+    // Only a landed grant settles the day. 'failed' is a transport blip,
+    // 'ready' means the grant is still unclaimed, and 'inactive' is an upstream
+    // refusal -- all three are retried, 'inactive' behind its cooldown.
+    if (result.outcome !== 'failed' && result.outcome !== 'ready' && result.outcome !== 'inactive') {
+      settled.set(account, day)
+    }
     return result
   }
 

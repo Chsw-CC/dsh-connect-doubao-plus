@@ -4,6 +4,82 @@
 
 ---
 
+## 0.16.0 — 2026-11-23
+
+> 修复自动签到：**「今日还未领取」不再被当成失败**，领取接口回 `710010702` 也不会再把这一天判成「该账号没有活动」。同时把登录身份做成本插件自己的事——请求带上与扫码浏览器一致的 UA / Referer / `sec-ch-ua` 和查询参数，`710022004` 那条风控提示才有机会不再出现。
+
+### 修复（签到）
+
+- **健康面板不再报成失败**：新增 `ready` 结果。面板可读、今日未领，就是「待领取」，不是错误；`ok` 为真，卡片不再挂一条误导性的告警。此前每个正常账号在卡片上看起来都像坏了。
+- **`710010702就是说「没有活动」」拆成两种含义**：只有 **面板读取** 能得出「这个账号没有签到活动」；**领取** 返回同一个码是上游的「系统错误」，什么都没发。以前按 `no_task` 结算，等于替一个正常账号把当天判完——按钮还亮着，调度器却不再重试，奖励就这么漏了。领取被拒现在记为 `inactive throw`，保持可重试。
+- **新增拒绝冷却 `CHECKIN_REFUSAL_COOLDOWN_MS`（1 小时）**：被拒后调度器不再立刻重试，避免把一次临时拒绝打成请求风暴；手动点「领取」不受冷却限制，用户想立刻再试随时可以。
+- **`ready` / `inactive` 也照常重试**：结算条件收窄为「真正落地」的 `claimed` / `already`（以及 `needs_login` / `no_task` 这两种重试也不会变的状态）。待领取和上游拒绝都会在下一个 tick 再试。
+
+### 修复（多账号）
+
+- **签到状态按账号隔离**：缓存、当天已结算标记、拒绝冷却，全部以登录会话派生的账号键分组（`uid_tt` 优先，`sessionid` 兜底，SHA-256 截断后仅 16 位十六进制，不落账号原文）。此前这些是三个模块级变量，换一个账号登录会直接继承上个账号的「今天已搞定」，当天奖励一次不领，而且没有任何报错。
+
+### 改进（请求身份）
+
+- **浏览器指纹捕获**（`src/doubao-fingerprint.ts`）：扫码登录时从官方页面读回 UA、Referer、`sec-ch-ua` 与查询参数，缓存成插件自己的请求身份；捕获失败不影响会话本身。
+- **请求按捕获身份发出**：`buildHeaders` / `buildQueryUrl` 在捕获存在时使用与浏览器一致的整套身份，普通对话因此不再需要走到「风险控制」提示那一步。
+- **官方页面中转（可选，默认关闭）**：`src/doubao-browser-relay.ts` 通过官方页面代发普通对话，只有显式写 `~/.dsh/doubao-browser-relay.json` 或设 `DSH_DOUBAO_BROWSER_RELAY` 才启用；**任务模式、生图、停止生成永不经过中转**，三者仍用桌面端身份直连。
+- **不伪造任何签名**：中转只复用官方页面自己的请求，不构造 `a_bogus`，不求解滑块。风控要求验证时，插件的回答仍是「请到客户端手动完成」。
+
+### 修复（跨平台）
+
+- **浏览器候选路径分平台**：Windows 保留四个系统安装路径并按 `LOCALAPPDATA` / `ProgramFiles*` / `ProgramW6432` 组装按用户安装路径；macOS 走 `Applications/Google Chrome.app`、`Microsoft Edge.app`（含 `~/Applications`）；Linux 走 `/usr/bin/google-chrome`、`chromium`、`microsoft-edge` 等。之前非 Windows 主机拿到的是四个 `C:\Program Files` 路径，扫码登录永远报「没找到 Chrome 或 Edge」。
+- **POSIX 关闭改为发信号**：`terminate()` 在非 Windows 上 `child.kill('SIGTERM')`，Windows 才走 `taskkill /T /F`（`taskkill` 不存在时回落到 `kill()`）。`spawnSync('taskkill')` 在不存在的平台上只会在 `result.error` 里报 ENOENT、不会 throw，旧写法因此静默留下了没关掉的浏览器和没释放的 profile 锁。
+- **`DSH_DOUBAO_CHROME` 覆盖生效**：显式指定的浏览器路径优先于候选列表，找不到就继续按平台回退，不再让一个失效的环境变量决定整条链路。
+
+### 其他
+
+- 版本对齐：`package.json` 从 `0.12.5` 升到 `0.16.0`（README、CHANGELOG 之前已在讲 0.15.0）。
+- 删除误生成的 `pnpm-lock.yaml`：仓库用 `package-lock.json`，两份锁文件会让依赖解析取决于谁先跑。
+
+### 验证
+
+- `tsc -p tsconfig.json` + `tsconfig.client.json`：通过。
+- `tsdown` 构建：通过。
+- `vitest run`：34 个文件，**331 通过 / 7 跳过**（新增 3 项签到回归：拒绝保持可重试、冷却内不重复、按账号独立结算）。
+## 0.16.0 — 2026-11-23
+
+> 修复自动签到：**「今日还未领取」不再被当成失败**；领取接口回 `710010702` 也不会再把这一天判成「该账号没有活动」。同时让请求带上与扫码浏览器一致的请求身份，`710022004` 那条风控提示才有机会不再出现。
+
+### 修复（签到）
+
+- **健康面板不再报成失败**：新增 `ready` 结果。面板可读、今日未领，就是「待领取」，不是错误；`ok` 为真，卡片不再挂误导性告警。此前每个正常账号在卡片上看起来都像坏了。
+- **`710010702` 按端点拆成两种含义**：只有**面板读取**能得出「这个账号没有签到活动」；**领取**返回同一个码是上游的「系统错误」，什么都没发。以前按 `no_task` 结算，等于替正常账号把当天判完——按钮还亮着，调度器却不再重试。领取被拒现在记为 `inactive`，保持可重试。
+- **新增拒绝冷却 `CHECKIN_REFUSAL_COOLDOWN_MS`（1 小时）**：被拒后调度器不再立刻重试，避免把一次临时拒绝打成请求风暴；手动点「领取」不受冷却限制。
+- **`ready` / `inactive` 照常重试**：结算条件收窄为真正落地的 `claimed` / `already`，以及重试也不会改变的 `needs_login` / `no_task`。
+
+### 修复（多账号）
+
+- **签到状态按账号隔离**：缓存、当天已结算标记、拒绝冷却改为以登录会话派生的账号键分组（`uid_tt` 优先、`sessionid` 兜底，SHA-256 截断取 16 位十六进制，不落账号原文）。此前这些是三个模块级变量，换账号登录会直接继承上一个账号的「今天已搞定」，当天奖励一次不领且没有任何报错。
+
+### 改进（请求身份）
+
+- **浏览器指纹捕获**（`src/doubao-fingerprint.ts`）：扫码登录时从官方页面读回 UA、Referer、`sec-ch-ua` 与查询参数并缓存；捕获失败不影响会话本身。
+- **按捕获身份发请求**：`buildHeaders` / `buildQueryUrl` 在捕获存在时使用与浏览器一致的整套身份漠。
+- **官方页面中转（可选，默认关闭）**：`src/doubao-browser-relay.ts` 通过官方页面代发**普通对话**；只有显式写 `~/.dsh/doubao-browser-relay.json` 或设 `DSH_DOUBAO_BROWSER_RELAY` 才启用。**任务模式、生图、停止生成永不经过中转**，三者仍用桌面端身份直连。
+- **不伪造签名**：中转只复用官方页面自己的请求，不构造 `a_bogus`，不求解滑块。
+
+### 修复（跨平台）
+
+- **浏览器候选路径分平台**：Windows 保留四个系统安装路径并按 `LOCALAPPDATA` / `ProgramFiles*` / `ProgramW6432` 组装按用户安装路径；macOS 走 `Applications/Google Chrome.app`、`Microsoft Edge.app`（含 `~/Applications`）；Linux 走 `/usr/bin/google-chrome`、`chromium`、`microsoft-edge` 等。之前非 Windows 主机拿到的是四个 `C:\Program Files` 路径，扫码登录永远报「没找到 Chrome 或 Edge」。
+- **POSIX 关闭改为发信号**：`terminate()` 在非 Windows 上用 `child.kill('SIGTERM')`，Windows 才走 `taskkill /T /F`（找不到 `taskkill` 时回落 `kill()`）。`spawnSync('taskkill')` 在不存在的平台上只在 `result.error` 里报 ENOENT、不会 throw，旧写法因此静默留下了没关掉的浏览器和没释放的 profile 锁。
+- **`DSH_DOUBAO_CHROME` 覆盖生效**：显式指定的浏览器路径优先，无效则继续按平台回退。
+
+### 其他
+
+- 版本对齐：`package.json` / `package-lock.json` 从 `0.12.5` 升到 `0.16.0`（README、CHANGELOG 此前已在讲 `0.15.0`）。
+- 删除误生成的 `pnpm-lock.yaml`：仓库用 `package-lock.json`，两份锁文件会让依赖解析取决于谁先跑。
+
+### 验证
+
+- `tsc -p tsconfig.json` 与 `tsc -p tsconfig.client.json`：通过。
+- `tsdown` 构建：通过。
+- `vitest run`：34 个文件，**331 通过 / 7 跳过**（新增 3 项签到回归：拒绝保持可重试、冷却内不重复、按账号独立结算）。
 ## 0.15.0 — 2026-11-22
 
 > 同步上游 0.8.0：**「工作任务」模式真正接上 DSH 的工作区工具**。此前任务模式只要请求带工具就整体拒绝，DSH 在该模式下读写不了任何文件；这一版把任务运行时下发的工作区命令桥接成本次请求已声明的 DSH 工具调用，由宿主执行，`finish_reason` 正确变为 `tool_calls`。

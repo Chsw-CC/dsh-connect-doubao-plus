@@ -26,14 +26,29 @@ import {
  * assertions are about protocol handling (idempotency, the 710012001 code, the
  * day boundary), none of which involves a live account.
  */
+/**
+ * Which account the mocked session belongs to.
+ *
+ * The scheduler's settled day and the claim cooldown are keyed by the live
+ * session, so account isolation can only be asserted by actually switching the
+ * account between calls. `vi.mock` is hoisted and cannot be re-declared per test;
+ * a mutable holder is the way in.
+ */
+const account = { id: 'test' }
+
 vi.mock('../src/doubao-auth.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/doubao-auth.ts')>()
   return {
     ...actual,
     loadDoubaoCredentials: () => ({
       ok: true,
-      header: 'sessionid=test; ttwid=test; msToken=test',
-      pairs: new Map([['sessionid', 'test'], ['ttwid', 'test'], ['msToken', 'test']]),
+      header: 'sessionid=' + account.id + '; ttwid=test; msToken=test',
+      pairs: new Map([
+        ['sessionid', account.id],
+        ['uid_tt', account.id],
+        ['ttwid', 'test'],
+        ['msToken', 'test'],
+      ]),
     }),
   }
 })
@@ -109,9 +124,12 @@ describe('readDoubaoCheckin', () => {
     const fetchMock = vi.fn(async () => jsonResponse(panelBody({ checked: false })))
     vi.stubGlobal('fetch', fetchMock)
     const view = await readDoubaoCheckin({ force: true })
-    expect(view.outcome).toBe('failed')
+    // «未领取» is a healthy state with work to do, not a failure: the button is
+    // the point. Reporting 'failed' here made every normal account look broken.
+    expect(view.outcome).toBe('ready')
+    expect(view.ok).toBe(true)
     expect(view.checkedInToday).toBe(false)
-    expect(view.error).toBe('今日还未领取')
+    expect(view.error).toBeNull()
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(calls.some((url) => url.includes('landing/checkin'))).toBe(false)
   })
@@ -217,5 +235,62 @@ describe('startDoubaoAutoCheckin', () => {
     handle.stop()
     expect(seen).toEqual(['claimed'])
     expect(second).toBeNull()
+  })
+})
+
+describe('claim refusals', () => {
+  it('keeps a refused claim retryable instead of inventing no_task', async () => {
+    // 710010702 on the CLAIM endpoint is 「系统错误」, not 「该账号没有活动」. Reading
+    // it as no_task settled the day for a healthy account: the panel still showed
+    // an unclaimed grant, the scheduler had already gone quiet, and nothing
+    // ever retried -- the exact shape of the missing-reward bug.
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+      const url = String(input)
+      if (url.includes('landing/checkin')) return jsonResponse({ code: 710010702, msg: '系统错误' })
+      return jsonResponse(panelBody({ checked: false }))
+    }))
+    const view = await claimDoubaoCheckin()
+    expect(view.outcome).toBe('inactive')
+    expect(view.ok).toBe(false)
+  })
+
+  it('does not retry a refusal before the cooldown, and does after it', async () => {
+    let claims = 0
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+      const url = String(input)
+      if (url.includes('landing/checkin')) {
+        claims += 1
+        return jsonResponse({ code: 710010702 })
+      }
+      return jsonResponse(panelBody({ checked: false }))
+    }))
+    await claimDoubaoCheckin()
+    expect(claims).toBe(1)
+    // Inside the cooldown a scheduler sweep must not spend another claim...
+    const cooled = await claimDoubaoCheckin({ respectCooldown: true })
+    expect(claims).toBe(1)
+    expect(cooled.outcome).toBe('inactive')
+    // ...while a user's explicit press may, immediately.
+    await claimDoubaoCheckin()
+    expect(claims).toBe(2)
+  })
+
+  it('settles each account separately', async () => {
+    // Signing in as a second account used to inherit the first account's
+    // "done today" and skip its claim with no request at all: a missing reward
+    // that looked like nothing was wrong.
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+      const url = String(input)
+      if (url.includes('landing/checkin')) return jsonResponse({ code: 0, data: { reward_amount: 200 } })
+      return jsonResponse(panelBody({ checked: true }))
+    }))
+    account.id = 'first'
+    const handle = startDoubaoAutoCheckin({ enabled: () => true, tickMs: 10, firstTickMs: 0 })
+    expect((await handle.runNow())?.outcome).toBe('claimed')
+    expect(await handle.runNow()).toBeNull()
+
+    account.id = 'second'
+    expect((await handle.runNow())?.outcome).toBe('claimed')
+    handle.stop()
   })
 })

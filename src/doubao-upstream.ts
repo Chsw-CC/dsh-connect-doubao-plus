@@ -26,7 +26,7 @@ import { dirname, isAbsolute, join, relative as relativeTo } from 'node:path'
 import {
   findDoubaoUserDataDir,
   loadDoubaoCredentials,
-  REQUIRED_COOKIE_NAMES,
+  CORE_AUTH_COOKIE_NAMES,
   type DoubaoCredentials,
 } from './doubao-auth.ts'
 import {
@@ -45,6 +45,8 @@ import {
   TASK_RUNTIME_LOCAL_PC,
   TASK_SANDBOX_AUTH_ALLOW_ALL,
 } from './doubao-catalog.ts'
+import { browserRelayChat, browserRelayEnabled } from './doubao-browser-relay.ts'
+import { browserFingerprint, type DoubaoBrowserFingerprint } from './doubao-fingerprint.ts'
 
 import { taskWorkspaceOperationsToDshCalls } from './doubao-tools.ts'
 import type { EmulatedToolCall, InboundTool } from './doubao-tools.ts'
@@ -114,15 +116,17 @@ export const DEFAULT_BOT_ID = '7338286299411103781'
 export function buildHeaders(
   credentials: DoubaoCredentials,
   extra: Record<string, string> = {},
+  fingerprint: DoubaoBrowserFingerprint | null = browserFingerprint(),
 ): Record<string, string> {
   return {
-    'User-Agent':
+    'User-Agent': fingerprint?.userAgent ?? (
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ' +
-      `Chrome/147.0.0.0 Safari/537.36 SamanthaDoubao/${DOUBAO_VERSION}`,
-    Referer: 'chrome://doubao-chat/',
+      `Chrome/147.0.0.0 Safari/537.36 SamanthaDoubao/${DOUBAO_VERSION}`
+    ),
+    Referer: fingerprint?.referer ?? 'chrome://doubao-chat/',
     accept: '*/*',
     'accept-language': 'zh-CN,zh;q=0.9',
-    'sec-ch-ua': '"Chromium";v="147", "Not.A/Brand";v="8"',
+    'sec-ch-ua': fingerprint?.secChUa ?? '"Chromium";v="147", "Not.A/Brand";v="8"',
     'sec-ch-ua-mobile': '?0',
     'sec-ch-ua-platform': '"Windows"',
     'sec-fetch-dest': 'empty',
@@ -138,8 +142,14 @@ export function buildHeaders(
   }
 }
 
-export function buildQueryUrl(endpoint: string, msToken?: string): string {
-  const params = new URLSearchParams({ ...CLIENT_PARAMS, web_tab_id: randomUUID() })
+export function buildQueryUrl(
+  endpoint: string,
+  msToken?: string,
+  fingerprint: DoubaoBrowserFingerprint | null = browserFingerprint(),
+): string {
+  // A captured page query replaces desktop-only fields, never merges with them.
+  const base = fingerprint?.query ?? CLIENT_PARAMS
+  const params = new URLSearchParams({ ...base, web_tab_id: randomUUID() })
   if (msToken) params.set('msToken', msToken)
   return `${endpoint}?${params.toString()}`
 }
@@ -1413,7 +1423,7 @@ async function streamOnce(
       { kind: 'session_dead' },
     )
   }
-  const missing = REQUIRED_COOKIE_NAMES.filter((name) => !credentials.pairs.get(name))
+  const missing = CORE_AUTH_COOKIE_NAMES.filter((name) => !credentials.pairs.get(name))
   if (missing.length > 0) {
     throw new DoubaoUpstreamError(
       `Doubao session cookies missing: ${missing.join(', ')}`,
@@ -1424,28 +1434,39 @@ async function streamOnce(
   }
 
   const msToken = credentials.pairs.get('msToken')
-  const url = buildQueryUrl(CHAT_ENDPOINT, msToken)
-  const headers = buildHeaders(credentials, { 'content-type': 'application/json' })
+  const isTask = taskModeEnabled(options)
+  // Task and stop channels are desktop-only features. Ordinary chat can instead
+  // adopt the captured web identity, so enabling it cannot reroute those paths.
+  const identity = isTask ? null : browserFingerprint()
+  const url = buildQueryUrl(CHAT_ENDPOINT, msToken, identity)
+  const headers = buildHeaders(credentials, { 'content-type': 'application/json' }, identity)
   const bodyObj = buildChatBody(prompt, options)
   const uniqueKey = bodyObj.option.unique_key
   const body = JSON.stringify(bodyObj)
-  const isTask = taskModeEnabled(options)
+  const useBrowserRelay = !isTask
+    && options.skill === undefined
+    && options.modelKey !== DOUBAO_IMAGE_MODEL_ID
+    && browserRelayEnabled()
 
   let response: Response
   const epoch = renewalEpoch
   try {
-    response = await fetch(url, {
-      method: 'POST',
-      headers,
-      body,
-      ...(options.signal ? { signal: options.signal } : {}),
-    })
+    response = useBrowserRelay
+      ? await browserRelayChat(prompt, {
+          ...(options.signal ? { signal: options.signal } : {}),
+        })
+      : await fetch(url, {
+          method: 'POST',
+          headers,
+          body,
+          ...(options.signal ? { signal: options.signal } : {}),
+        })
   } catch (error) {
     // A caller abort is not a failure — let the AbortError through untouched so
     // the shim can tell "user cancelled" from "network broke".
     if (options.signal?.aborted) throw error
     throw new DoubaoUpstreamError(
-      `Doubao request did not reach the server: ${(error as Error).message}`,
+      `${useBrowserRelay ? '官方浏览器转发失败' : 'Doubao request did not reach the server'}: ${(error as Error).message}`,
       undefined,
       false,
       { transport: true },
@@ -1630,10 +1651,10 @@ export async function stopGeneration(
   ids: { conversationId: string; questionId: string },
 ): Promise<void> {
   const msToken = credentials.pairs.get('msToken')
-  const url = buildQueryUrl(BREAK_STREAM_ENDPOINT, msToken)
+  const url = buildQueryUrl(BREAK_STREAM_ENDPOINT, msToken, null)
   const headers = buildHeaders(credentials, {
     'content-type': 'application/json; encoding=utf-8',
-  })
+  }, null)
   delete headers['last-event-id']
   const epoch = renewalEpoch
   const res = await fetch(url, {

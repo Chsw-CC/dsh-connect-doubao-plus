@@ -73,6 +73,7 @@ import {
   type DoubaoSkillName,
 } from './doubao-catalog.ts'
 import { isDiscoveredTaskModel, peekModels } from './doubao-discovery.ts'
+import { browserRelayEnabled } from './doubao-browser-relay.ts'
 import {
   buildToolContract,
   parseToolCalls,
@@ -1668,7 +1669,9 @@ export function createDoubaoShim(options: DoubaoShimOptions = {}): DoubaoShim {
       }
       // Image turns run standalone under `imageGen`; reusing a prior text or task
       // conversationId carries old mode/refusal context and causes text replies.
-      const continuing = !imageModel && isContinuation(parsed.messages, known)
+      // The official-page relay opens a fresh conversation per turn, so a delta
+      // would be sent without the history it depends on.
+      const continuing = !imageModel && !browserRelayEnabled() && isContinuation(parsed.messages, known)
       /**
        * What to send.
        *

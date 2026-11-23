@@ -35,3 +35,8 @@ awesome-dsh-plugin/
 
 # 打包产物（npm pack），发布时用，不入库
 *.tgz
+
+# 依赖锁文件以 package-lock.json 为准（npm 发布链路）。
+# pnpm 只是本地开发/CI 的安装器，它每次跑都会重写自己那份锁文件，
+# 两份锁文件并存会让解析结果取决于谁先跑，因此 pnpm 的那份不入库。
+pnpm-lock.yaml

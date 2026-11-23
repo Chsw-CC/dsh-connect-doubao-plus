@@ -19,7 +19,19 @@ export const DOUBAO_QUOTA_PATH = '/plugins/dsh-connect-doubao-plus/quota'
 export const DOUBAO_CHECKIN_PATH = '/plugins/dsh-connect-doubao-plus/checkin'
 
 /** What the check-in call can report. Mirrors the host's own union exactly. */
-export type DoubaoCheckinOutcome = 'claimed' | 'already' | 'needs_login' | 'no_task' | 'failed'
+export type DoubaoCheckinOutcome =
+  | 'claimed'
+  | 'already'
+  /**
+   * Panel read fine, today's grant is still unclaimed. A healthy state, not an
+   * error: the card offers the button instead of a warning line.
+   */
+  | 'ready'
+  /** Upstream refused this claim for now; the scheduler backs off and retries. */
+  | 'inactive'
+  | 'needs_login'
+  | 'no_task'
+  | 'failed'
 
 /**
  * The check-in payload `GET|POST {DOUBAO_CHECKIN_PATH}` returns.

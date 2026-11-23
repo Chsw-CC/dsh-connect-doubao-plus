@@ -57,9 +57,17 @@ export interface DoubaoCredentials {
  */
 export const CREDENTIAL_TTL_MS = 10 * 60 * 1000
 
+/** Four cookies that prove the account; the rest are auxiliary tracking cookies. */
+export const CORE_AUTH_COOKIE_NAMES = [
+  'sessionid',
+  'sessionid_ss',
+  'sid_tt',
+  'uid_tt',
+] as const
+
 /**
- * Cookie names Doubao's chat backend actually needs for authentication.
- * Verified in M1/M2: this exact set authenticated while the app was closed.
+ * Full cookie set to harvest when available.
+ * An auxiliary cookie being blocked or delayed must not discard a valid session.
  */
 export const REQUIRED_COOKIE_NAMES = [
   'sessionid',
@@ -325,7 +333,7 @@ export function loadBrowserCredentials(): DoubaoCredentials | undefined {
       const [name, value] = entry as [unknown, unknown]
       if (typeof name === 'string' && typeof value === 'string' && name !== '') pairs.set(name, value)
     }
-    const missing = REQUIRED_COOKIE_NAMES.filter((name) => !pairs.get(name))
+    const missing = CORE_AUTH_COOKIE_NAMES.filter((name) => !pairs.get(name))
     // A file that decrypts but lacks a required cookie is a HALF session: the
     // scan was abandoned mid-flow or the server rotated part of the jar. Serving
     // it would fail upstream with a message about the account, not about the
