@@ -1247,14 +1247,14 @@ async function runToolLocalResponder(
 ): Promise<boolean> {
   let localOperationRejected = false
   const msToken = credentials.pairs.get('msToken')
-  // These endpoints belong to the desktop client's task runtime; they keep the
-  // desktop identity even when a web fingerprint is configured for chat.
+  // Same identity as the task turn that produced these calls: the session is a
+  // web session, and a second identity here would be the same mismatch again.
   const postToolJson = async (endpoint: string, payload: unknown): Promise<Record<string, any> | undefined> => {
-    const url = buildQueryUrl(endpoint, msToken, null)
+    const url = buildQueryUrl(endpoint, msToken)
     const headers = buildHeaders(credentials, {
       'content-type': 'application/json',
       accept: 'application/json, text/plain, */*',
-    }, null)
+    })
     delete headers['last-event-id']
     const res = await fetch(url, {
       method: 'POST',
@@ -1449,11 +1449,17 @@ async function streamOnce(
 
   const msToken = credentials.pairs.get('msToken')
   const isTask = taskModeEnabled(options)
-  // A captured fingerprint is the identity of the WEB page, and a web session is
-  // what the QR login produced. Task mode is a desktop-client feature: it keeps
-  // its frozen desktop identity so enabling the fingerprint cannot change how a
-  // task turn is routed.
-  const identity = isTask ? null : browserFingerprint()
+  // ONE identity, both modes.
+  //
+  // The session is a WEB session (QR login), so every request it authorises must
+  // present the web identity — the frozen desktop one (`aid=582478`, a shared
+  // device_id, `SamanthaDoubao/2.31.4`) is exactly the mismatch risk control
+  // compared. Task turns used to keep the desktop identity on the theory that
+  // task mode "belongs" to the desktop client, but the captured web query already
+  // carries the same desktop-shaped fields (`doubao_pc_version`, `samantha_web=1`),
+  // so the split bought no protocol safety — only a second, inconsistent
+  // fingerprint for the same session.
+  const identity = browserFingerprint()
   // Non-fatal, but never silent: a browser session presented with the desktop
   // identity is the mismatch that invites 710022004, and the fix is one command.
   if (!isTask && identity === null && !warnedMissingFingerprint) {
