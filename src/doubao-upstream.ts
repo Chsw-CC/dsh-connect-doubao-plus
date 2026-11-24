@@ -1552,7 +1552,15 @@ async function streamOnce(
  * plugin itself from looking like an automation loop: one request at a time, a
  * quiet gap between attempts, and a persistent circuit breaker after 710022004.
  */
-const DEFAULT_NODE_INTERVAL_MS = 8_000
+/**
+ * 8s was chosen while the direct path still presented the DESKTOP identity with
+ * web cookies, i.e. while every request was a candidate for a slider challenge.
+ * With the captured web identity a plain turn costs ~1.7-4s of upstream time, so
+ * the old gap made any second request in the same turn (title, summary, retry)
+ * wait up to 8 seconds for no protection it still needed. 2s stays serialized and
+ * slower than a human typing a follow-up.
+ */
+const DEFAULT_NODE_INTERVAL_MS = 2_000
 const DEFAULT_RISK_COOLDOWN_MS = 60 * 60 * 1000
 let nodeQueue: Promise<unknown> = Promise.resolve()
 let lastNodeAttemptAt = 0
