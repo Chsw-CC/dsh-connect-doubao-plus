@@ -34,17 +34,14 @@ describe('enabledModelsOf', () => {
     expect(enabledModelsOf(undefined, catalog)).toHaveLength(catalog.length)
   })
 
-  it('still serves the catalog for an EMPTY list, the first-run rule', () => {
-    // Deliberate, and the reason the checkboxes looked broken for so long:
-    // schemastery's default for the field is `[]`, so "never configured" and
-    // "unticked everything" are the SAME value on this host line. Serving the
-    // catalog for it is what keeps a fresh install from opening an empty picker.
-    //
-    // Narrowing this to "ticked" alone is therefore not a one-line change -- it
-    // needs a separate "has ever been saved" marker, and until that exists this
-    // test documents the trade rather than pretending it is not there.
+  it('serves the whole catalog for `undefined` (never saved) and nothing for []', () => {
+    // The two states are now distinct, and `withStoredSettings` is what keeps
+    // them apart: the schema's `[]` default (a never-saved install) is folded to
+    // `undefined` there, while a `[]` that came from the settings FILE means the
+    // user ticked nothing and must be honoured.
     const catalog = catalogOf(DISCOVERED_A)
-    expect(enabledModelsOf([], catalog)).toHaveLength(catalog.length)
+    expect(enabledModelsOf(undefined, catalog)).toHaveLength(catalog.length)
+    expect(enabledModelsOf([], catalog)).toHaveLength(0)
   })
 
   it('keeps only the ticked ids', () => {

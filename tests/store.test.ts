@@ -139,13 +139,31 @@ describe('withStoredSettings', () => {
     expect(() => { writeStoredSetting('profileDir', 42, file) }).toThrow('invalid value')
   })
 
-  it('defaults to an empty model list, tools on and automatic discovery', () => {
+  it('defaults to "never configured", tools on and automatic discovery', () => {
+    // `undefined` — not `[]` — so a first-run install serves the whole catalog.
+    // The Host's `[]` placeholder must not survive the merge as a selection.
     expect(withStoredSettings(undefined, file)).toEqual({
-      enabledModelIds: [],
+      enabledModelIds: undefined,
       toolEmulation: true,
       profileDir: '',
       autoCheckin: false,
     })
+    expect(withStoredSettings({ enabledModelIds: [] }, file).enabledModelIds).toBeUndefined()
+  })
+
+  it('keeps a stored empty list as a deliberate "ticked none"', () => {
+    // The user pressed "select none" and saved. Folding that back into
+    // `undefined` would silently re-publish every entry, which is the very
+    // class of bug this change fixes — so the FILE wins, verbatim.
+    writeStoredSetting('enabledModelIds', [], file)
+    const merged = withStoredSettings({ enabledModelIds: ['0'] }, file)
+    expect(merged.enabledModelIds).toEqual([])
+  })
+
+  it('keeps a stored list even when the Loader default is empty', () => {
+    writeStoredSetting('enabledModelIds', ['person-glm-5-4'], file)
+    const merged = withStoredSettings({ enabledModelIds: [] }, file)
+    expect(merged.enabledModelIds).toEqual(['person-glm-5-4'])
   })
 
   it('survives a settings-change reload driven by the Loader copy', () => {
@@ -162,7 +180,9 @@ describe('withStoredSettings', () => {
     expect(reloaded.enabledModelIds).toEqual(['5', 'image-gen'])
     expect(effectiveIds(reloaded)).toEqual(['5', 'image-gen'])
     // ...while the payload that used to be trusted would have widened the picker:
-    expect(effectiveIds(loaderCopy)).toBeUndefined()
+    // it is the schema's `[]` placeholder, which `withStoredSettings` folds to
+    // `undefined`; read raw it means "ticked none", i.e. the opposite failure.
+    expect(effectiveIds(loaderCopy)).toEqual([])
   })
 })
 

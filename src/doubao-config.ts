@@ -19,21 +19,24 @@ export const ENABLED_MODEL_IDS_FIELD = 'enabledModelIds'
 /** Shape of this plugin's settings. */
 export interface DoubaoSettings {
   /**
-   * Catalog ids the user has ticked.
+   * Catalog ids the user has ticked, or `undefined` when never saved.
    *
-   * Defaults to `[]` — which means "NOT YET CONFIGURED" rather than "ticked
-   * nothing". The two are separated by {@link isConfigured}, which treats a
-   * never-saved field the same as an empty one; schemastery 3.18.4 has no
-   * `.optional()` and folds an `undefined` default into a NULLABLE field, which
-   * would add a third state (`null`) for the card to disambiguate. The reference
-   * connector uses the same default-plus-explicit-seeding approach.
+   * THREE states, all meaningful:
    *
-   * An empty list therefore serves the WHOLE catalog, so a first-run install
-   * shows its models. Collapsing the two states would instead silently re-publish
-   * every entry for a user who had deliberately ticked none — which is why
-   * `enabledModelsOf` keys off {@link isConfigured} rather than off emptiness.
+   *   `undefined` — never saved. The whole catalog is served, so a first-run
+   *                 install shows its models.
+   *   `[]`        — a saved EMPTY selection. Nothing is served; that is a real
+   *                 choice and must not be read as "not configured".
+   *   `[a, b]`    — serve exactly these ids.
+   *
+   * The distinction is carried by {@link withStoredSettings}, which is the only
+   * place that can still tell them apart: `Config` declares
+   * `z.array(z.string()).default([])`, so the Host always hands `apply` an empty
+   * array for a user who never saved, while a saved `[]` in this plugin's own
+   * settings file survives as `[]`. Collapsing the two would silently
+   * re-publish every entry for a user who had deliberately ticked none.
    */
-  enabledModelIds: string[]
+  enabledModelIds: string[] | undefined
   /**
    * Simulate tool calling in the prompt so Doubao can drive the Harness tools.
    *
@@ -136,7 +139,10 @@ function asVolatile<T>(schema: T): T {
   return typeof candidate.volatile === 'function' ? candidate.volatile() : schema
 }
 
-export const Config: z<DoubaoSettings> = z.object({
+// The schema's `enabledModelIds` default is `[]` (a plain array), while
+// `DoubaoSettings` allows `undefined` for "never saved"; `withStoredSettings` is
+// what folds the placeholder into that third state.
+export const Config: z<DoubaoSettings & { enabledModelIds: string[] }> = z.object({
   enabledModelIds: asVolatile(z.array(z.string()).default([]))
     .description('Catalog ids enabled in the DSH model picker. Doubao routes upstream by content, so this selects which entries are offered, never which model answers. Empty means "not yet configured" and serves the whole catalog.'),
   toolEmulation: asVolatile(z.boolean().default(true))
@@ -168,7 +174,11 @@ export function enabledIdsOf(config: unknown): string[] | undefined {
  * first-run install would show an empty model picker.
  */
 export function effectiveIds(config: unknown): string[] | undefined {
-  const ids = enabledIdsOf(config)
-  if (ids === undefined || ids.length === 0) return undefined
-  return ids
+  // A pure pass-through: `undefined` stays `undefined` (never configured → whole
+  // catalog) and a saved empty list stays empty (the user ticked nothing → serve
+  // nothing). The schema's `[]` placeholder is folded to `undefined` exactly
+  // once, inside `withStoredSettings`, where "the Host's default" and "the
+  // user's saved value" can still be told apart. Folding again here erased a
+  // deliberate "ticked none".
+  return enabledIdsOf(config)
 }

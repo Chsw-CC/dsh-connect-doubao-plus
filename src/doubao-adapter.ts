@@ -207,8 +207,10 @@ export function createDoubaoAdapter(options: DoubaoAdapterOptions): DoubaoAdapte
 
   /**
    * Which catalog ids are currently in force, or undefined for "never
-   * configured" (serve everything). Updated by {@link setEnabledModelIds} when
-   * the user saves a different checklist selection.
+   * configured" (serve everything). An empty array is a real selection —
+   * "the user ticked none" — and serves nothing. Updated by
+   * {@link setEnabledModelIds} when the user saves a different checklist
+   * selection.
    */
   let enabledIds: string[] | undefined = options.enabledModelIds
 

@@ -509,8 +509,10 @@ export function discoverDoubaoModels(
  * restriction — but it still only decides WHICH ENTRIES APPEAR IN DSH's MODEL
  * PICKER; the per-request choice is made by the DSH session, not here.
  *
- * `undefined` (never configured) serves the whole catalog: a first-run install
- * must show its models. Ids that no longer exist are dropped.
+ * `undefined` means "never configured" and serves the whole catalog, so a
+ * first-run install shows its models. A saved list — including the empty one,
+ * which is a user who deliberately ticked nothing — is honoured VERBATIM:
+ * only ticked ids survive, and ids that no longer exist are dropped.
  *
  * The tick list is AUTHORITATIVE, including for ids the static catalog below has
  * never heard of. It used to keep every UNKNOWN id unconditionally, on the theory
@@ -527,19 +529,8 @@ export function enabledModelsOf(
   enabledIds: string[] | undefined,
   models: readonly DoubaoModelInfo[] = DOUBAO_MODELS,
 ): DoubaoModelInfo[] {
-  if (enabledIds === undefined || enabledIds.length === 0) return [...models]
+  if (enabledIds === undefined) return [...models]
   const wanted = new Set(enabledIds)
-  // The tick list is AUTHORITATIVE, for a discovered id exactly as for a static
-  // one. This used to be `|| !known.has(model.id)` -- "keep anything the static
-  // list does not know about, so a new Doubao release is never invisible". The
-  // intent was right and the effect was the opposite: as soon as discovery
-  // returns the real menu (seven ids the static list has never heard of), every
-  // one of those became immune to its own checkbox, and unticking Kimi or
-  // GLM changed nothing while the picker kept offering it.
-  //
-  // Nothing is lost: the card seeds its draft from the catalog it just read, so
-  // an unknown id arrives TICKED and has to be unticked deliberately. That is
-  // the behaviour this line now honours.
   return models.filter((model) => wanted.has(model.id))
 }
 
