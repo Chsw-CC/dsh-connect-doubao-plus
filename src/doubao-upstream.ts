@@ -1519,10 +1519,7 @@ async function streamOnce(
   const body = JSON.stringify(bodyObj)
   // Image turns and task turns keep their specialized channels. Ordinary chat
   // can use the official page itself, including its model selection and signing.
-  const useBrowserRelay = !isTask
-    && options.skill === undefined
-    && options.modelKey !== DOUBAO_IMAGE_MODEL_ID
-    && (options.forceRelay === true || browserRelayEnabled())
+  const useBrowserRelay = relayEligible(options, isTask, options.forceRelay === true)
 
   let response: Response
   const epoch = renewalEpoch
@@ -1751,6 +1748,27 @@ async function runNodeCall<T>(call: () => Promise<T>, signal?: AbortSignal): Pro
  * is retried ONCE as plain chat — and only when the failed attempt emitted no
  * text, so a fallback can never duplicate a partially streamed answer.
  */
+/**
+ * Whether a turn may be served by the official page.
+ *
+ * Three places ask the same question (which path a turn takes, whether the
+ * rescue may try the other one, and whether the caller forced it), and they
+ * must answer identically or the rescue would attempt a channel the turn is
+ * disqualified from. Task turns, skill turns (生图) and image requests keep
+ * their specialized channels; everything else can go through a real browser,
+ * which signs with the TLS/JS fingerprint Node cannot imitate.
+ */
+function relayEligible(
+  options: ChatRequestOptions,
+  taskMode: boolean,
+  forced: boolean,
+): boolean {
+  if (taskMode) return false
+  if (options.skill !== undefined) return false
+  if (options.modelKey === DOUBAO_IMAGE_MODEL_ID) return false
+  return forced || browserRelayEnabled()
+}
+
 export async function streamChat(
   prompt: string,
   options: ChatRequestOptions & {
@@ -1778,10 +1796,7 @@ export async function streamChat(
   // `forceRelay` is a parameter rather than a process.env toggle so a rescue
   // cannot leak into a concurrent turn (or into the user's next one).
   const call = (taskMode: boolean, forceRelay = false): Promise<DoubaoChatResult> => {
-    const useRelay = !taskMode
-      && options.skill === undefined
-      && options.modelKey !== DOUBAO_IMAGE_MODEL_ID
-      && (forceRelay || browserRelayEnabled())
+    const useRelay = relayEligible(options, taskMode, forceRelay)
     const execute = (): Promise<DoubaoChatResult> => useRelay
       ? streamOnce(prompt, { ...options, callbacks: wrapped, taskMode, forceRelay })
       : streamOnce(prompt, { ...options, callbacks: wrapped, taskMode })
@@ -1803,8 +1818,9 @@ export async function streamChat(
       && (error.code === CODE_RATE_LIMITED || error.rateLimited)
       && !emittedText
       && !taskModeEnabled(options)
-      && options.skill === undefined
-      && options.modelKey !== DOUBAO_IMAGE_MODEL_ID
+      // Only when the user has NOT opted into the relay: if they did, the turn
+      // already went through the page and a second attempt would be a replay.
+      && relayEligible({ ...options, forceRelay: true }, false, true)
       && process.env.DSH_DOUBAO_BROWSER_RELAY === undefined
       && !browserRelayEnabled()
       && browserRelayAvailable()

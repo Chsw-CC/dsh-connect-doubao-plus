@@ -8,7 +8,7 @@
 > itself talks to Doubao over HTTPS with your session.
 
 [![release](https://img.shields.io/github/v/release/Chsw-CC/dsh-connect-doubao-plus)](https://github.com/Chsw-CC/dsh-connect-doubao-plus/releases)
-[![version](https://img.shields.io/badge/version-0.17.0-blue)](./CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.18.0-blue)](./CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 [![platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](#platform-support)
 [![dshfind](https://img.shields.io/badge/dshmarket-dshfind-blueviolet)](https://dshfind.dev)
@@ -41,6 +41,7 @@
 - **Tool emulation (on by default)** — OpenAI `tools` → `doubao-tool` fence → `tool_calls`, so Doubao can drive DSH's local tools. Parsing only accepts tools the request actually declared; workspace permissions and execution stay on the Harness side. Disable with `toolEmulation: false`.
 - **Web identity captured at sign-in** — the same browser window records `User-Agent` / `Referer` / `sec-ch-ua` plus the query string (`aid`, `device_id`, …) into `~/.dsh/doubao-browser-fingerprint.json`, so direct requests present the page's own identity instead of a web-cookie-plus-desktop-disguise mix that trips `710022004`. Existing installs can backfill once with `doctor --fingerprint`.
 - **Honest quota states** — `loading` / `signed_out` / `network` / `unreadable` are shown separately; a failed read keeps the last reading visible and names the real cause instead of blaming DPAPI decryption.
+- **Automatic risk fallback** — when the direct path is refused with `710022004` and nothing has been streamed yet, the turn is finished through the official page (real browser signing), the local circuit breaker is cleared and the next turn goes direct again; only when both paths demand a challenge does it tell you to clear the slider by hand. Disable with `DSH_DOUBAO_BROWSER_RELAY=0`.
 - **Content moderation as its own class** — a policy refusal is reported as `content_blocked` (HTTP 400 / `CONTENT_BLOCKED`), stays out of the retry set, and says to reword or split the question; the plugin does not and cannot bypass moderation.
 - **Local-only loop** — chat goes through a shim bound to `127.0.0.1` with a per-process shared secret; any non-local request gets 401. Credentials are sealed with DPAPI / AES-256-GCM and cached in-process for 10 minutes.
 - **Command-line checks** — `doctor` verifies credentials, account, shim, quota, models and identity without spending quota; `probe` runs one real chat as a smoke test. Four risk-control commands sit alongside: `--fingerprint` (re-capture the web identity), `--verify` (open the official page for a human to clear the challenge), `--resume` (drop the local circuit breaker) and `--relay on|off` (send ordinary chat through the official page; task mode and image generation keep the plugin's own channel).
@@ -65,7 +66,7 @@
 
 ```bash
 # install from the tarball (recommended)
-dsh plugin --profile desktop add "<path>/dsh-connect-doubao-plus-0.17.0.tgz"
+dsh plugin --profile desktop add "<path>/dsh-connect-doubao-plus-0.18.0.tgz"
 ```
 
 > This plugin is not on the npm registry and does not support `dsh plugin add <git url>`: `prepack` needs `npm`, while the runtime shipped with Harness only has `node`. Both the tarball and the source directory load the already-built `lib/` — no build step.
