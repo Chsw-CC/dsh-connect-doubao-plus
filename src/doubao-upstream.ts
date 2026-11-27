@@ -23,7 +23,11 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { appendFile, mkdir, writeFile } from 'node:fs/promises'
 import { hostname, homedir, tmpdir } from 'node:os'
 import { homeDir } from './doubao-profile.ts'
-import { browserRelayChat, browserRelayEnabled } from './doubao-browser-relay.ts'
+import {
+  browserRelayAvailable,
+  browserRelayChat,
+  browserRelayEnabled,
+} from './doubao-browser-relay.ts'
 import { dirname, isAbsolute, join, relative as relativeTo } from 'node:path'
 import {
   findDoubaoUserDataDir,
@@ -373,6 +377,12 @@ export interface ChatRequestOptions {
    * `!!ext.general_task_param`); `agent_mode` stays 1.
    */
   taskMode?: boolean
+  /**
+   * Serve this turn through the official page even though the relay switch is
+   * off. Used only by the risk-control rescue, which has already proved that
+   * the direct path is being challenged.
+   */
+  forceRelay?: boolean
   /**
    * Ask for the 深度思考 pass (probe knob; see `buildChatBody`).
    */
@@ -1512,7 +1522,7 @@ async function streamOnce(
   const useBrowserRelay = !isTask
     && options.skill === undefined
     && options.modelKey !== DOUBAO_IMAGE_MODEL_ID
-    && browserRelayEnabled()
+    && (options.forceRelay === true || browserRelayEnabled())
 
   let response: Response
   const epoch = renewalEpoch
@@ -1765,22 +1775,69 @@ export async function streamChat(
     onTurnIds: (ids) => options.callbacks?.onTurnIds?.(ids),
   }
   const wanted = taskModeEnabled(options)
-  const call = (taskMode: boolean): Promise<DoubaoChatResult> => {
-    const execute = (): Promise<DoubaoChatResult> =>
-      streamOnce(prompt, { ...options, callbacks: wrapped, taskMode })
+  // `forceRelay` is a parameter rather than a process.env toggle so a rescue
+  // cannot leak into a concurrent turn (or into the user's next one).
+  const call = (taskMode: boolean, forceRelay = false): Promise<DoubaoChatResult> => {
     const useRelay = !taskMode
       && options.skill === undefined
       && options.modelKey !== DOUBAO_IMAGE_MODEL_ID
-      && browserRelayEnabled()
+      && (forceRelay || browserRelayEnabled())
+    const execute = (): Promise<DoubaoChatResult> => useRelay
+      ? streamOnce(prompt, { ...options, callbacks: wrapped, taskMode, forceRelay })
+      : streamOnce(prompt, { ...options, callbacks: wrapped, taskMode })
     return useRelay ? execute() : runNodeCall(execute, options.signal)
+  }
+  /**
+   * A risk challenge is recoverable WITHOUT a human when the official page can
+   * answer instead: the page signs its own requests with the browser's real TLS
+   * and JS fingerprint, which is the one thing the direct path cannot imitate.
+   * Measured 2026-11-26: the direct path was refused while the very same account
+   * answered normally through the page.
+   *
+   * Never replays a turn that already streamed text, so an answer cannot be
+   * duplicated, and never when the user explicitly forced the direct path.
+   */
+  const rescueThroughOfficialPage = async (error: unknown): Promise<DoubaoChatResult> => {
+    const recoverable = error instanceof DoubaoUpstreamError
+      && !error.local
+      && (error.code === CODE_RATE_LIMITED || error.rateLimited)
+      && !emittedText
+      && !taskModeEnabled(options)
+      && options.skill === undefined
+      && options.modelKey !== DOUBAO_IMAGE_MODEL_ID
+      && process.env.DSH_DOUBAO_BROWSER_RELAY === undefined
+      && !browserRelayEnabled()
+      && browserRelayAvailable()
+    if (!recoverable) throw error
+    process.stderr.write('[risk] 710022004 on the direct path; retrying this turn through the official page\n')
+    try {
+      const result = await call(false, true)
+      clearRiskCircuit()
+      process.stderr.write('[risk] the official page answered; direct requests resume on the next turn\n')
+      return result
+    } catch (relayError) {
+      throw isRiskChallengeFailure(relayError)
+        ? new DoubaoUpstreamError(
+          '豆包风控在两条路径上都要求验证（插件直连与官方页面都被要求过滑块），这是账号级风控，只能由人完成验证。'
+          + '运行 dsh-connect-doubao-doctor --verify 打开官方页面过滑块，再 --resume 解除本地冷却。',
+          CODE_RATE_LIMITED,
+          true,
+          { kind: 'rate_limited' },
+        )
+        : error
+    }
   }
   try {
     return await call(wanted)
   } catch (error) {
     const taskRuntimeMissing = error instanceof DoubaoUpstreamError &&
       (error.code === CODE_TASK_RUNTIME_UNAVAILABLE || /agent_err_real_answer/.test(error.message))
-    if (!wanted || !taskRuntimeMissing || emittedText) throw error
-    return call(false)
+    if (!wanted || !taskRuntimeMissing || emittedText) return await rescueThroughOfficialPage(error)
+    try {
+      return await call(false)
+    } catch (plainError) {
+      return await rescueThroughOfficialPage(plainError)
+    }
   }
 }
 
@@ -2512,6 +2569,18 @@ export function isContentModerationNotice(text: string): boolean {
 }
 
 /** Build a user-facing message for a Doubao failure. */
+/**
+ * Whether a failure is the server's slider challenge itself.
+ *
+ * Excludes the local cooldown: a turn the plugin refused never reached the
+ * network, so it has nothing to recover and must not look like a challenge.
+ */
+export function isRiskChallengeFailure(error: unknown): boolean {
+  if (!(error instanceof DoubaoUpstreamError)) return false
+  if (error.local) return false
+  return error.code === CODE_RATE_LIMITED || error.rateLimited
+}
+
 export function describeDoubaoFailure(error: unknown): string {
   if (error instanceof DoubaoUpstreamError) {
     // The cooldown is OURS, not the server's. Saying "被风控" for a turn that was

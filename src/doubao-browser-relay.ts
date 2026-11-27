@@ -333,7 +333,17 @@ async function relayOnce(prompt: string, options: RelayOptions): Promise<Respons
         try {
           // Each DSH turn is self-contained. Starting a new official conversation
           // avoids ever sending a delta without the history it depends on.
-          await cdp.call('Page.navigate', { url: CHAT_URL })
+          // Reloading the chat page costs most of a relayed turn (~10s of the
+          // 14s measured). It is only needed when the page is somewhere else;
+          // an already-open chat page can take the prompt as-is.
+          const location = await cdp.call('Runtime.evaluate', {
+            expression: 'location.href',
+            returnByValue: true,
+          }).catch(() => undefined)
+          const href = String((location?.result as { value?: unknown } | undefined)?.value ?? '')
+          if (!href.startsWith(CHAT_URL)) {
+            await cdp.call('Page.navigate', { url: CHAT_URL })
+          }
           await waitForComposer(cdp, Math.min(timeoutMs, 20_000))
           await cdp.call('Input.insertText', { text: prompt })
           for (const type of ['keyDown', 'keyUp']) {
